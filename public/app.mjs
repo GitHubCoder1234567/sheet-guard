@@ -1,12 +1,12 @@
-import {a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
-import {scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
+import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
+import {readDataset, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
 
 const nav = document.querySelector('#nav'), main = document.querySelector('#main');
 const notice = document.querySelector('#notice'), connection = document.querySelector('#connection');
-const tabs = ['Chat','Audit','Recommendations','Visualisations','History','Settings'];
+const tabs = ['Audit','Recommendations','Visualisations','History','Settings'];
 const state = {
-  tab:'Chat', ready:false, busy:false, findings:[], snapshots:[], dismissed:new Set(),
+  tab:'Chat', workspaceMode:null, menuOpen:false, ready:false, busy:false, findings:[], snapshots:[], dismissed:new Set(),
   previews:new Map(), edits:new Map(), checked:new Set(), history:[], messages:[],
   filter:'All', sort:'Severity', query:'', selected:null, inspected:new Map(), explanation:new Set(),
   previewMode:new Map(), clarified:new Map(), batchReview:false, lastScan:null, sheets:[], monitor:null, consent:false, draft:'', scanned:false, manualKind:'chart', accessPassword:'',
@@ -36,18 +36,29 @@ function select(options,value) {
   el.value=value;
   return el;
 }
-function setTab(tab) {state.tab=tab;render();}
+function setTab(tab) {state.tab=tab;state.menuOpen=false;render();}
 function render() {
-  nav.replaceChildren(...tabs.map(tab=>{
+  const menu=node('details',undefined,'workspace-menu');
+  menu.open=state.menuOpen;
+  const summary=node('summary','Menu');
+  summary.setAttribute('aria-label','Workspace menu');
+  menu.append(summary);
+  const links=node('div',undefined,'menu-items');
+  for (const tab of tabs) {
     const b=button(tab,()=>setTab(tab),{during:true});
     if (tab===state.tab) b.setAttribute('aria-current','page');
-    return b;
-  }));
-  main.replaceChildren(node('h2',state.tab));
+    links.append(b);
+  }
+  menu.append(links);
+  menu.addEventListener('toggle',()=>{if (menu.isConnected) state.menuOpen=menu.open;});
+  nav.replaceChildren(menu);
+  main.replaceChildren();
   if (!state.ready) {
-    main.append(block(node('p','Open this task pane in Microsoft Excel. The manifest and setup guide are in the release package.')));
+    main.append(block(node('p','Open Forma inside Microsoft Excel to work with a workbook.')));
     return;
   }
+  if (state.tab!=='Chat') main.append(
+    button('Back to workspace',()=>setTab('Chat'),{during:true}),node('h2',state.tab));
   ({Chat:chatView,Audit:auditView,Recommendations:()=>recommendations(false),Visualisations:()=>recommendations(true),
     History:historyView,Settings:settingsView}[state.tab])();
 }
@@ -60,6 +71,7 @@ async function run(work,label) {
 }
 const findingAddress = f => f.sheet+'!'+f.address;
 function available(a) {
+  if (a.kind==='pivot') return supported('1.8');
   if (['chart','dashboard'].includes(a.kind)) return supported('1.10');
   if (['negative','heatmap','dataBar'].includes(a.kind)) return supported('1.6');
   return supported('1.13');
@@ -142,13 +154,13 @@ function auditView() {
 }
 
 const labels={chart:'Create chart',dashboard:'Create dashboard',style:'Style headings',number:'Change number display',
-  formula:'Repair formula',trim:'Trim text whitespace',negative:'Highlight negatives',heatmap:'Apply a colour scale',dataBar:'Add data bars'};
+  formula:'Repair formula',pivot:'Create PivotTable',nonnegative:'Prevent negative values',trim:'Trim text whitespace',negative:'Highlight negatives',heatmap:'Apply a colour scale',dataBar:'Add data bars'};
 const numberFormats={percent:'0.0%',decimal:'#,##0.00',date:'yyyy-mm-dd',integer:'0'};
 function manualPanel(visual) {
   const card=block(node('h3','From the current selection'));
-  const options=Object.entries(labels).filter(([kind])=>!['formula','trim'].includes(kind) && (!visual || ['chart','dashboard','heatmap','dataBar'].includes(kind)));
+  const options=Object.entries(labels).filter(([kind])=>!['formula','trim','pivot','nonnegative'].includes(kind) && (!visual || ['chart','dashboard','heatmap','dataBar'].includes(kind)));
   const kind=select(options,options.some(([v])=>v===state.manualKind)?state.manualKind:options[0][0]);
-  kind.addEventListener('change',()=>{state.manualKind=kind.value;render();});
+  kind.addEventListener('change',()=>{state.manualKind=kind.value;state.toolsOpen=kind.closest('details')?.open;render();});
   const option=kind.value==='number'?select(Object.keys(numberFormats).map(k=>[k,k]),'percent'):
     kind.value==='style'?select(Object.keys(palettes).map(k=>[k,k]),'Professional'):
     ['chart','dashboard'].includes(kind.value)?select(Object.keys(chartTypes).map(k=>[k,k]),'column'):null;
@@ -181,9 +193,14 @@ async function makeManual(s,kind,option) {
   state.findings=[f,...state.findings.filter(x=>x.id!==f.id)];
   return f;
 }
-function recommendations(visual) {
-  main.append(manualPanel(visual));
-  if (!visual) {
+function recommendations(visual,inline=false) {
+  if (!inline) {
+    const tools=node('details',undefined,'tools');
+    tools.open=!!state.toolsOpen;
+    tools.addEventListener('toggle',()=>{if(tools.isConnected) state.toolsOpen=tools.open;});
+    tools.append(node('summary','Prepare a change from the selection'),manualPanel(visual));main.append(tools);
+  }
+  if (!visual && !inline) {
     const filter=select(['All',...categories].map(c=>[c,c]),state.filter);
     filter.addEventListener('change',()=>{state.filter=filter.value;state.batchReview=false;render();});
     main.append(field('Category',filter));
@@ -192,7 +209,7 @@ function recommendations(visual) {
   search.addEventListener('change',()=>{state.query=search.value.trim();state.batchReview=false;render();});
   const order=select(['Severity','Confidence','Worksheet','Recommendation type','Expected impact'].map(v=>[v,v]),state.sort);
   order.addEventListener('change',()=>{state.sort=order.value;state.batchReview=false;render();});
-  main.append(field('Find recommendations',search),field('Sort by',order));
+  if (!inline) main.append(field('Find recommendations',search),field('Sort by',order));
   const priority=f=>f.priority??0;
   const by={
     Severity:(a,b)=>priority(b)-priority(a),
@@ -202,8 +219,9 @@ function recommendations(visual) {
     'Expected impact':(a,b)=>impact(b)-impact(a),
   };
   const list=state.findings.filter(f=>!state.dismissed.has(f.id) && (visual?
-    ['Visualisations','Analysis'].includes(f.category):state.filter==='All'||f.category===state.filter))
-    .filter(f=>[f.title,f.sheet,f.address,f.detail].join(' ').toLowerCase().includes(state.query.toLowerCase())).sort(by[state.sort]);
+    ['Visualisations','Analysis'].includes(f.category):inline||state.filter==='All'||f.category===state.filter))
+    .filter(f=>!inline || state.workspaceMode!=='clean' || f.category==='Data Quality')
+    .filter(f=>inline || [f.title,f.sheet,f.address,f.detail].join(' ').toLowerCase().includes(state.query.toLowerCase())).sort(by[state.sort]);
   const candidates=list.slice(0,32).filter(f=>state.checked.has(f.id)&&state.previews.has(f.id));
   if (candidates.length>1) {
     const plans=candidates.map(f=>state.previews.get(f.id));
@@ -258,6 +276,7 @@ function historySummary(p) {
     const row=previewRows(p)[0];
     return JSON.stringify(row.before)+' → '+JSON.stringify(row.after);
   }
+  if (a.kind==='pivot') return 'Sum of '+a.measure+' by '+a.dimension+' · new worksheet';
   if (a.kind==='style') return a.value+' heading style';
   return a.title || labels[a.kind];
 }
@@ -287,7 +306,24 @@ function card(f) {
   const severity=(f.priority??0)>=85?'High priority':(f.priority??0)>=60?'Review':'';
   const card=block(node('div',[f.category,severity,status].filter(Boolean).join(' · '),'meta'),node('h3'),node('div',findingAddress(f),'address'));
   card.querySelector('h3').append(toggle);
-  if (chosen) {card.classList.add('selected');card.append(node('p',f.detail),node('p','Evidence · '+f.evidence,'muted'));}
+  if (chosen) {
+    card.classList.add('selected');
+    const simple=f.action?.kind==='formula'?'Nearby rows use a different calculation. Compare this cell with its neighbours before applying a correction.':f.plain||f.detail;
+    card.append(node('p',simple));
+    if (f.action?.kind==='formula') card.append(node('p','This is a possible inconsistency. The workbook may intentionally use a different rule here.','muted'));
+    const further=node('details',undefined,'explanation');
+    const technical=node('details');
+    technical.append(node('summary','Technical evidence'),node('p',f.detail));
+    further.append(node('summary','Explain further'),node('p','Affected range · '+findingAddress(f)),
+      node('p','Evidence · '+f.evidence),technical);
+    card.append(further);
+    if (f.matchRows) {
+      const table=node('details');
+      table.append(node('summary','Compare matching rows'));
+      for(const row of f.matchRows) table.append(node('p',row.address+' · '+row.values.join('  |  ')));
+      card.append(table);
+    }
+  }
   const actions=node('div',undefined,'actions');
   if (executable) {
     actions.append(button(p?'Refresh preview':'Preview',open));
@@ -398,6 +434,19 @@ function customisation(f) {
 function previewPanel(p,id) {
   const section=node('section',undefined,'details'), {action:a,snapshot:s,data}=p;
   section.append(node('h3','Change preview'),node('p',s.name+'!'+a.address,'address'));
+  if (a.kind==='nonnegative') {
+    section.append(node('p','Keep current values. Future entries must be zero or greater. Blank cells remain allowed.'),
+      node('p','Excel will display a Stop alert when a typed entry fails this rule. No existing rule will be replaced.','muted'));
+    return section;
+  }
+  if (p.report) {
+    const report=p.report;
+    section.append(node('p','Native PivotTable · new worksheet'),node('p','Sum of '+report.measure+' by '+report.dimension),
+      node('p',report.count+' source records · '+report.groups.length+' groups','muted'));
+    for (const group of report.groups.slice(0,12)) section.append(node('p',group.label+' · '+group.sum.toLocaleString()));
+    if (report.groups.length>12) section.append(node('p','Preview shows 12 groups. The report will include them all.','muted'));
+    return section;
+  }
   if (data) {
     section.append(node('p',a.type+' · '+a.title),node('p',(a.xLabel||data.x)+' / '+(a.yLabel||data.y),'muted'));
     if (a.kind==='dashboard') {
@@ -469,30 +518,170 @@ function previewPanel(p,id) {
   return section;
 }
 
+function launchReview(mode) {
+  state.workspaceMode=mode;
+  run(doScan,'Reviewing workbook…');
+}
+
 function chatView() {
-  if (!state.messages.length) main.append(block(node('h3','Ask about your workbook'),
-    node('p','Select the relevant cells, then ask for an explanation or propose a change.'),
-    button('Run workbook audit',()=>{state.tab='Audit';run(doScan,'Scanning workbook…');},{primary:true})));
+  const form=node('form',undefined,'composer');
+  const input=node('textarea');input.maxLength=2000;
+  input.placeholder='Ask Forma anything about your spreadsheet…';input.value=state.draft;
+  input.disabled=state.busy;input.addEventListener('input',()=>{state.draft=input.value;});
+  form.append(field('Workbook question',input));
+  const send=button('Send',()=>{},{primary:true});send.type='submit';
+  form.append(send);
+  form.addEventListener('submit',event=>{
+    event.preventDefault();
+    const q=state.draft.trim();
+    if (!q) return;
+    if (/^(?:review|check|audit|scan)(?: my| this| the)? (?:spreadsheet|workbook|sheet)[.!]?$/i.test(q)) {
+      state.draft='';launchReview('review');return;
+    }
+    if (/^(?:clean|clean and organise)(?: my| this| the)? (?:dataset|data|table|spreadsheet)[.!]?$/i.test(q)) {
+      state.draft='';launchReview('clean');return;
+    }
+    if (/^compare (?:these |two )?(?:datasets|ranges|tables|worksheets)[.!]?$/i.test(q)) {
+      state.draft='';state.workspaceMode='compare';state.comparison={};render();return;
+    }
+    if (/^(?:prevent negative (?:values|numbers|quantities)|require non-negative (?:values|numbers))[.!]?$/i.test(q)) {
+      state.draft='';run(()=>prepareValidation(q),'Preparing validation…');return;
+    }
+    if (/^create (?:a )?pivot\s*table for total .+ by .+[.!]?$/i.test(q)) {
+      state.draft='';run(()=>preparePivot(q),'Preparing report…');return;
+    }
+    if (/^(?:(?:show me |calculate )?total .+ by .+|explain (?:this|the selected) (?:formula|calculation))[.!]?$/i.test(q)) {
+      state.draft='';run(()=>answerLocal(q),'Reading selected cells…');return;
+    }
+    if (!state.consent) {
+      notice.textContent='Enable AI data sharing in Settings to send this question. Local reviews and calculations stay in Excel.';
+      return;
+    }
+    run(()=>ask(q),'Working on your question…');
+  });
+  main.append(form);
+  if (state.datasetController) main.append(button('Cancel reading',()=>state.datasetController.abort(),{during:true}));
+  const suggestions=node('div',undefined,'actions suggestions');
+  suggestions.append(button('Review my spreadsheet',()=>launchReview('review')));
+  const relevant=state.findings.some(f=>f.category==='Data Quality');
+  suggestions.append(button(relevant?'Clean and organise':'Compare datasets',()=>{
+    if (relevant) launchReview('clean');
+    else {state.workspaceMode='compare';state.comparison={};render();}
+  }));
+  suggestions.append(button('Explore insights',()=>launchReview('insights')));
+  main.append(suggestions);
   for (const m of state.messages.slice(-18)) {
-    const item=block(node('div',m.role==='user'?'You':'SheetGuard AI','meta'),node('p',m.text,'chat'));
+    const item=block(node('div',m.role==='user'?'You':'Forma','meta'),node('p',m.text,'chat'));
     if (m.proposal && !state.dismissed.has(m.proposal.id)) item.append(button('Review proposal',()=>{
       state.filter='All';setTab('Recommendations');}));
     if (m.role==='user') item.classList.add('mine');main.append(item);
   }
-  const form=node('form');
-  const input=node('textarea');input.maxLength=2000;input.placeholder='What formulas look inconsistent?';input.value=state.draft;
-  input.disabled=state.busy;input.addEventListener('input',()=>{state.draft=input.value;});
-  form.append(field('Workbook question',input));
-  const send=button('Send',()=>{},{primary:true,enabled:state.consent});send.type='submit';
-  form.append(send);
-  if (!state.consent) form.append(node('p','Enable AI data sharing in Settings to send questions. Local audits remain available.','muted'),
-    button('Open Settings',()=>setTab('Settings')));
-  form.addEventListener('submit',event=>{
-    event.preventDefault();
-    const q=state.draft.trim();
-    if (q&&state.consent) run(()=>ask(q),'Working on your question…');
-  });
-  main.append(block(form));
+  if (state.workspaceMode==='compare') main.append(comparisonPanel());
+  else if (state.workspaceMode) {
+    main.append(node('h2',{review:'Workbook review',clean:'Cleaning opportunities',insights:'Workbook insights'}[state.workspaceMode]));
+    if (state.scanController) main.append(button('Cancel scan',()=>state.scanController.abort(),{during:true}));
+    if (state.lastScan) {
+      const cells=state.snapshots.reduce((total,s)=>total+s.values.length*s.values[0].length,0);
+      main.append(node('p',cells.toLocaleString()+' cells reviewed · '+state.snapshots.length+' visible sheets'+
+        (state.omitted||state.snapshots.some(s=>s.partial)?' · partial coverage':''),'muted'));
+      recommendations(state.workspaceMode==='insights',true);
+    }
+  }
+}
+async function captureDataset() {
+  state.datasetController=new AbortController();
+  render();
+  try {
+    return await readDataset(state.datasetController.signal,(read,total)=>{
+      notice.textContent='Read '+read.toLocaleString()+' of '+total.toLocaleString()+' rows.';
+    });
+  } finally {state.datasetController=null;}
+}
+function comparisonPanel() {
+  const view=state.comparison;
+  const panel=block(node('h2','Compare datasets'),node('p','In Excel, select the first range including its headers, capture it, then repeat for the second range.'));
+  for (const [key,label] of [['first','First'],['second','Second']]) {
+    panel.append(button('Capture '+label.toLowerCase()+' selection',()=>run(async()=>{
+      const dataset=await captureDataset();
+      datasetColumns(dataset.values);
+      view[key]=dataset;view.result=null;
+      return label+' selection captured.';
+    },'Reading selection…')));
+    if (view[key]) panel.append(node('p',view[key].sheet+'!'+view[key].address+' · '+(view[key].values.length-1)+' data rows','address'));
+  }
+  if (!view.first || !view.second) return panel;
+  const right=new Set(datasetColumns(view.second.values).map(v=>v.toLowerCase()));
+  const options=datasetColumns(view.first.values).filter(v=>right.has(v.toLowerCase()));
+  if (!options.length) {panel.append(node('p','The captures need a shared identifier column header.'));return panel;}
+  const key=select([['','Choose a matching column'],...options.map(v=>[v,v])],view.key??'');
+  key.addEventListener('change',()=>{view.key=key.value;view.result=null;render();});
+  panel.append(field('Match records by',key),button('Compare records',()=>run(async()=>{
+    view.result=compareDatasets(view.first,view.second,view.key);return 'Comparison ready.';
+  },'Comparing records…'),{enabled:!!options.includes(view.key),primary:true}));
+  if (!view.result) return panel;
+  const r=view.result;
+  panel.append(node('p',r.added+' new · '+r.removed+' missing · '+r.changed+' changed · '+r.unchanged+' unchanged'));
+  panel.append(node('p',r.ambiguous+' repeated key values excluded · '+r.missing+' rows with unusable keys · '+r.ignoredErrors+' matched records contain errors','muted'));
+  if (r.firstOnly.length||r.secondOnly.length) panel.append(node('p','Columns only in first: '+(r.firstOnly.join(', ')||'none')+
+    '. Only in second: '+(r.secondOnly.join(', ')||'none')+'.','muted'));
+  const detail=node('details');detail.append(node('summary','Sample changes'));
+  for (const row of r.samples) {
+    detail.append(node('p',row.type+' · '+row.key,'meta'));
+    for (const cell of row.changes??[]) detail.append(node('p',cell.name+': '+cell.before+' → '+cell.after+
+      (cell.delta===undefined?'':' (difference '+cell.delta.toLocaleString()+
+        (cell.percent===undefined?'':', '+new Intl.NumberFormat(undefined,{style:'percent',maximumFractionDigits:2}).format(cell.percent))+')')));
+  }
+  panel.append(detail);return panel;
+}
+async function prepareValidation(question) {
+  const s=await selection();
+  const action={kind:'nonnegative',sheetId:s.id,address:s.address};
+  await preview(action);
+  const f={id:JSON.stringify(['manual',s.id,s.address,action.kind]),manual:true,category:'Data Quality',
+    title:'Prevent negative values',detail:'Require numbers greater than or equal to zero in the selected cells.',
+    evidence:'Requested entry rule',sheet:s.name,address:s.address,action};
+  state.findings=[f,...state.findings.filter(x=>x.id!==f.id)];state.dismissed.delete(f.id);
+  state.messages.push({role:'user',text:question},{role:'assistant',text:'The validation proposal is ready to review.',proposal:f});
+}
+async function preparePivot(question) {
+  const [,measure,dimension]=/^create (?:a )?pivot\s*table for total (.+) by (.+)$/i.exec(question.replace(/[.!]$/,''));
+  if (!supported('1.8')) throw Error('This Excel host lacks native PivotTables. Ask “total '+measure+' by '+dimension+'” for an on-screen summary.');
+  const source=await selection();
+  const action={kind:'pivot',sheetId:source.id,address:source.address,measure,dimension};
+  const f={id:JSON.stringify(['manual',source.id,source.address,'pivot',measure,dimension]),manual:true,
+    category:'Analysis', title:'PivotTable · '+measure+' by '+dimension,detail:'Summarise the selected data on a new worksheet.',
+    sheet:source.name,address:source.address,evidence:'Selected data and requested fields',action};
+  await preview(action);
+  state.findings=[f,...state.findings.filter(x=>x.id!==f.id)];state.dismissed.delete(f.id);
+  state.messages.push({role:'user',text:question},{role:'assistant',text:'The PivotTable proposal is ready to review.',proposal:f});
+  return '';
+}
+
+async function answerLocal(question) {
+  state.messages.push({role:'user',text:question});
+  const query=question.replace(/[.!]$/,'');
+  const total=/^(?:show me |calculate )?total (.+) by (.+)$/i.exec(query);
+  let reply;
+  if (total) {
+    const data=await captureDataset(), result=summariseBy(data,total[1],total[2]);
+    const top=result.groups.slice(0,12).map(({label,sum,records})=>
+      label+': '+sum.toLocaleString(undefined,{maximumFractionDigits:8})+' ('+records+' rows)');
+    reply='Total '+result.measure+' by '+result.dimension+'\n\n'+(top.join('\n')||'No eligible numeric rows.')+
+      '\n\nSource: '+data.sheet+'!'+data.address+'. '+result.count+' included, '+result.omitted+' omitted.'+
+      (result.groups.length>12?' Showing the 12 largest of '+result.groups.length+' groups.':'');
+  } else {
+    const s=await selection();
+    if (s.values.length!==1 || s.values[0].length!==1) throw Error('Select one formula cell to explain it.');
+    if (!formula(s,0,0)) throw Error('Select a cell containing a formula.');
+    const expression=s.formulas[0][0];
+    const description=/^\s*=\s*XLOOKUP\(/i.test(expression)?
+      'XLOOKUP searches for a value in one range and returns the corresponding value from another. A missing match can return #N/A unless the formula supplies a fallback.':
+      'Excel calculates this cell using the formula below. The references listed are the cells and ranges Forma can identify.';
+    const refs=formulaReferences(expression.slice(0,4096)).slice(0,15).map(x=>(x.sheet?x.sheet+'!':'')+x.first+(x.last?':'+x.last:''));
+    reply=s.name+'!'+s.address+'\n'+description+'\n\n'+expression+'\nCurrent result: '+s.display[0][0]+
+      (refs.length?'\nReferences: '+refs.join(', '):'');
+  }
+  state.messages.push({role:'assistant',text:reply});return '';
 }
 async function ask(question) {
   const conversation=state.messages.slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
@@ -529,7 +718,7 @@ async function ask(question) {
     state.messages.push(message);
     try {
       if (result.intent==='audit') {
-        state.tab='Audit';
+        state.workspaceMode='review';
         return await doScan();
       }
       if (result.finding>=0 && findings[result.finding]?.action) message.proposal=findings[result.finding];
@@ -567,7 +756,7 @@ function settingsView() {
   opt.addEventListener('change',()=>{state.consent=opt.checked;render();});
   const label=node('label',undefined,'check');label.append(opt,node('span','Allow AI data sharing for this session'));
   main.append(block(node('h3','AI and workbook data'),label,node('p',
-    'Sending a question shares your prompt, up to 12 rows by 8 columns from the selection, up to 12 audit summaries, sampled sheet and column profiles, and recent chat via your SheetGuard host and OpenAI. Workbook scans and writes run inside Excel. Session settings and undo data clear when the pane closes.')));
+    'Sending a question shares your prompt, up to 12 rows by 8 columns from the selection, up to 12 audit summaries, sampled sheet and column profiles, and recent chat via your Forma host and OpenAI. Workbook scans and writes run inside Excel. Session settings and undo data clear when the pane closes.')));
   const access=node('input');access.type='password';access.maxLength=256;access.value=state.accessPassword;
   access.disabled=state.busy;access.autocomplete='off';
   access.addEventListener('input',()=>{state.accessPassword=access.value;});

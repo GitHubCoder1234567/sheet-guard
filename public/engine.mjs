@@ -213,9 +213,14 @@ export function audit(sheets) {
     for (let c = 0; c < widths; c++) {
       const invalidDates = [], formats = new Map(), numbersAsText = [], missing = [], categoryVariants = new Map(), sample = [];
       const label = String(s.values[0][c] || col(s.column+c));
-      const patterns=new Map();
+      const patterns=new Map(), ids=new Map();
+      const identifier=/\bid\b|identifier|invoice number|account number/i.test(label);
       for (let r = 1; r < rows; r++) {
         const v = s.values[r][c];
+        if (identifier && (numeric(v) || text(v)) && s.types[r][c]!=='Error') {
+          if (!ids.has(v)) ids.set(v,[]);
+          ids.get(v).push(r);
+        }
         if (/\bdate\b/i.test(label) && invalidDate(v)) invalidDates.push(addr(r,c));
         if (numeric(v)) {
           const fmt = s.formats[r][c];
@@ -243,6 +248,19 @@ export function audit(sheets) {
         add('Errors', 80, formula(s,r,c) ? 'Formula differs from nearby rows' : 'Calculated column has an exception',
           'Four adjacent rows use ' + expected + '. Review this exception before applying the pattern.',
           address, {kind:'formula', sheetId:s.id, address, value:expected}, 'Adjacent formula pattern');
+      }
+      const repeats=[...ids.values()].filter(group=>group.length>1);
+      if (repeats.length) {
+        for (const group of repeats.slice(0,3)) {
+          const first=s.values[group[0]];
+          const same=group.every(r=>JSON.stringify(s.values[r])===JSON.stringify(first));
+          const address=addr(group[1],c);
+          add('Data Quality',84,'Repeated identifier · '+label,
+            group.length+' rows share this identifier ('+group.slice(0,8).map(r=>addr(r,c)).join(', ')+'). '+
+              (same?'Their values match across the sampled columns.':'Their values differ in at least one sampled column. Confirm whether this identifier is intended to be unique.'),
+            address,undefined,'Exact key match');
+          findings.at(-1).matchRows=group.slice(0,3).map(r=>({address:addr(r,0),values:s.display?.[r]?.slice(0,6)??s.values[r].slice(0,6)}));
+        }
       }
       if (patterns.size>1) {
         const ordered=[...patterns].sort((a,b)=>b[1].length-a[1].length);
@@ -309,6 +327,12 @@ export function validate(action) {
   const bounds = rect(action.address);
   if (action.kind === 'formula') {
     if (bounds.rows !== 1 || bounds.columns !== 1 || !correction(action.value,bounds.c)) throw Error('Only bounded single-cell arithmetic repairs are supported.');
+  } else if (action.kind==='nonnegative') {
+    if (bounds.columns!==1) throw Error('Select the numeric cells in one column.');
+  } else if (action.kind === 'pivot') {
+    const labels=[action.measure,action.dimension];
+    if (bounds.rows<2 || bounds.columns<2 || labels.some(v=>typeof v!=='string' || !v.trim() || v.length>120) ||
+        action.measure.toLowerCase()===action.dimension.toLowerCase()) throw Error('Choose two report fields.');
   } else if (action.kind === 'trim') {
     if (bounds.rows!==1 || bounds.columns!==1) throw Error('Text cleanup is limited to one cell.');
   } else if (action.kind === 'number') {
@@ -388,4 +412,108 @@ export function headingStyle(action) {
   });
   const luminance=rgb[0]*0.2126+rgb[1]*0.7152+rgb[2]*0.0722;
   return [true,luminance>0.179?'#000000':'#FFFFFF',fill];
+}
+
+export const DATASET_CELL_LIMIT = 160000;
+export const DATASET_ROW_LIMIT = 50000;
+export function datasetColumns(values) {
+  const headers=values[0];
+  if (!headers || !headers.every(v=>typeof v==='string' && v.trim()))
+    throw Error('Select a range with a text header in every column.');
+  const columns=headers.map(v=>v.trim());
+  if (new Set(columns.map(v=>v.toLowerCase())).size!==columns.length)
+    throw Error('Each column needs a distinct header.');
+  return columns;
+}
+const columnIndex=(columns,label)=>{
+  const index=columns.findIndex(v=>v.toLowerCase()===label.trim().toLowerCase());
+  if (index<0) throw Error('Column "'+label+'" was not found. Available columns: '+columns.slice(0,12).join(', ')+'.');
+  return index;
+};
+const present=row=>row.some(v=>v!=='' && v!==null);
+const scalar=v=>typeof v==='string' || typeof v==='number' && Number.isFinite(v) || typeof v==='boolean';
+
+export function summariseBy(dataset,measure,dimension) {
+  const columns=datasetColumns(dataset.values);
+  const m=columnIndex(columns,measure), d=columnIndex(columns,dimension);
+  if (m===d) throw Error('Choose different columns for the measure and grouping.');
+  const totals=new Map();
+  let omitted=0, count=0;
+  for (let i=1;i<dataset.values.length;i++) {
+    const row=dataset.values[i];
+    if (!present(row)) continue;
+    const value=row[m], key=row[d];
+    if (!numeric(value) || !scalar(key) || key==='' || dataset.errors?.[i]?.length &&
+       (dataset.errors[i].includes(m) || dataset.errors[i].includes(d))) {omitted++;continue;}
+    const group=totals.get(key)??{label:key,sum:0,compensation:0,records:0};
+    const adjustment=value-group.compensation;
+    const next=group.sum+adjustment;
+    if (!Number.isFinite(next)) throw Error('The total exceeds the supported numeric range.');
+    group.compensation=(next-group.sum)-adjustment;
+    group.sum=next;group.records++;
+    totals.set(key,group);count++;
+  }
+  return {groups:[...totals.values()].sort((a,b)=>b.sum-a.sum),measure:columns[m],dimension:columns[d],count,omitted};
+}
+
+export function compareDatasets(first,second,keyLabel,maxSamples=12) {
+  const left=datasetColumns(first.values), right=datasetColumns(second.values);
+  const key=columnIndex(left,keyLabel), otherKey=columnIndex(right,keyLabel);
+  const rightPositions=new Map(right.map((v,i)=>[v.toLowerCase(),i]));
+  const fields=left.flatMap((v,i)=>rightPositions.has(v.toLowerCase())&&i!==key?[[v,i,rightPositions.get(v.toLowerCase())]]:[]);
+  const index=(data,k)=>{
+    const map=new Map(), repeated=new Set();let missing=0;
+    for (let i=1;i<data.values.length;i++) {
+      const row=data.values[i],value=row[k];
+      if (!present(row)) continue;
+      if (!scalar(value) || value==='' || typeof value==='string'&&!value.trim() || data.errors?.[i]?.includes(k)) {missing++;continue;}
+      if (map.has(value)) repeated.add(value);
+      else map.set(value,i);
+    }
+    return {map,repeated,missing};
+  };
+  const l=index(first,key),r=index(second,otherKey);
+  const ambiguous=new Set([...l.repeated,...r.repeated]);
+  const result={added:0,removed:0,changed:0,unchanged:0,ambiguous:ambiguous.size,missing:l.missing+r.missing,
+    firstOnly:left.filter(v=>!rightPositions.has(v.toLowerCase())),
+    secondOnly:right.filter(v=>!left.some(k=>k.toLowerCase()===v.toLowerCase())),samples:[],ignoredErrors:0};
+  function sample(change) {if (result.samples.length<maxSamples) result.samples.push(change);}
+  for (const [value,i] of l.map) {
+    if (ambiguous.has(value)) continue;
+    if (!r.map.has(value)) {result.removed++;sample({key:value,type:'Missing from second'});continue;}
+    const j=r.map.get(value);
+    let changed=0, errors=0;
+    const changes=[];
+    for (const [name,a,b] of fields) {
+      if (first.errors?.[i]?.includes(a) || second.errors?.[j]?.includes(b)) {errors++;continue;}
+      const before=first.values[i][a],after=second.values[j][b];
+      if (before===after) continue;
+      changed++;
+      if (changes.length>=8) continue;
+      const delta=numeric(before)&&numeric(after)?after-before:undefined;
+      const percent=before!==0&&delta!==undefined?delta/before:undefined;
+      changes.push({name,before,after,delta:Number.isFinite(delta)?delta:undefined,percent:Number.isFinite(percent)?percent:undefined});
+    }
+    if (errors) result.ignoredErrors++;
+    if (changed) {result.changed++;sample({key:value,type:'Changed',changes,changed});}
+    else if (!errors) result.unchanged++;
+  }
+  for (const value of r.map.keys()) {
+    if (!ambiguous.has(value) && !l.map.has(value)) {result.added++;sample({key:value,type:'New in second'});}
+  }
+  return result;
+}
+
+
+export function pivotPreview(data,action) {
+  if (data.values[0].some(v=>typeof v!=='string' || v.trim()!==v || v.length>120))
+    throw Error('PivotTable source needs clean text headers in all columns.');
+  const errors=data.types.map(row=>row.flatMap((type,i)=>type==='Error'?[i]:[]));
+  const result=summariseBy({values:data.values,errors},action.measure,action.dimension);
+  const canonical=result.groups.map(g=>typeof g.label==='string'&&g.label.trim()===g.label?
+    g.label.toLowerCase():null);
+  if (result.omitted || !result.count || result.count!==data.values.length-1 || canonical.includes(null) ||
+      new Set(canonical).size!==canonical.length || canonical.includes('') || canonical.length>250)
+    throw Error('For this PivotTable preview, use complete numeric measures and up to 250 clean text groups.');
+  return result;
 }

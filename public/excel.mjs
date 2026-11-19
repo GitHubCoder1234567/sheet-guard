@@ -1,4 +1,4 @@
-import {a1, rect, validate, chartData, chartTypes, headingStyle, correction, formula, trimText, additiveMeasure, LIMIT} from './engine.mjs';
+import {a1, rect, validate, chartData, chartTypes, pivotPreview, headingStyle, correction, formula, trimText, additiveMeasure, LIMIT, DATASET_CELL_LIMIT, DATASET_ROW_LIMIT} from './engine.mjs';
 
 const properties = 'rowIndex,columnIndex,rowCount,columnCount,values,formulas,formulasR1C1,numberFormat,valueTypes,text';
 export const supported = version => Office.context.requirements.isSetSupported('ExcelApi',version);
@@ -162,13 +162,34 @@ async function formulaContext(ctx,sheet,action) {
   return {band:snapshot,inputs:inputs.map(cell=>cell.values[0][0])};
 }
 
+async function checkNonnegative(ctx,sheet,range,snapshot) {
+  if (!supported('1.13')) throw Error('This validation requires ExcelApi 1.13 for protected, merged and spill checks.');
+  await writable(ctx,sheet,range,true);
+  range.dataValidation.load('type');
+  await ctx.sync();
+  if (range.dataValidation.type!=='None') throw Error('The selection already has a validation rule. Choose cells without validation.');
+  if (!snapshot.values.some(([v])=>typeof v==='number' && Number.isFinite(v)) ||
+      snapshot.values.some(([v],i)=>snapshot.types[i][0]==='Error'|| (v!=='' && v!==null && (typeof v!=='number'||v<0))))
+    throw Error('Select numeric cells without headers or existing negative values.');
+}
+
 export async function preview(action) {
   validate(action);
   return Excel.run(async ctx => {
     const {snapshot,sheet,range} = await loadSource(ctx,action);
     const visual = ['chart','dashboard'].includes(action.kind);
     if (visual && !supported('1.10')) throw Error('Charts require ExcelApi 1.10.');
-    let destination, position, formulaEvidence, currentStyle;
+    let destination, position, formulaEvidence, currentStyle, report;
+    if (action.kind==='nonnegative') await checkNonnegative(ctx,sheet,range,snapshot);
+    if (action.kind==='pivot') {
+      if (!supported('1.8')) throw Error('Native PivotTables require ExcelApi 1.8.');
+      const protection=ctx.workbook.protection;
+      protection.load('protected');
+      await ctx.sync();
+      if (protection.protected) throw Error('Workbook structure is protected.');
+      await assertVisible(ctx,range);
+      report=pivotPreview(snapshot,action);
+    }
     if (['style','number','trim'].includes(action.kind)) await writable(ctx,sheet,range,true);
     if (action.kind==='trim') await checkTrim(ctx,range,snapshot);
     if (action.kind==='style') {
@@ -209,7 +230,7 @@ export async function preview(action) {
       await ctx.sync();
       if (protection.protected) throw Error('Workbook structure is protected.');
     }
-    return {action:structuredClone(action), snapshot, data, destination, position, formulaEvidence,currentStyle};
+    return {action:structuredClone(action), snapshot, data, destination, position, formulaEvidence,currentStyle,report};
   });
 }
 
@@ -348,12 +369,66 @@ async function dashboard(ctx,source,action,data,sourceName) {
   return name + ' · ' + chartName;
 }
 
+async function createPivot(ctx,range,snapshot,action) {
+  if (!supported('1.8')) throw Error('Native PivotTables require ExcelApi 1.8.');
+  await assertVisible(ctx,range);
+  const report=pivotPreview(snapshot,action), wb=ctx.workbook;
+  const sheets=wb.worksheets;
+  sheets.load('items/name');wb.protection.load('protected');
+  wb.pivotTables.load('items/name');
+  await ctx.sync();
+  if (wb.protection.protected) throw Error('Workbook structure is protected.');
+  const names=new Set([...sheets.items,...wb.pivotTables.items].map(x=>x.name.toLowerCase()));
+  let suffix=1;
+  while (names.has(('Forma report '+suffix).toLowerCase()) || names.has(('FormaReport'+suffix).toLowerCase())) suffix++;
+  const sheetName='Forma report '+suffix, pivotName='FormaReport'+suffix;
+  const target=sheets.add(sheetName);
+  const pivot=target.pivotTables.add(pivotName,range,target.getRange('A3'));
+  pivot.rowHierarchies.add(pivot.hierarchies.getItem(report.dimension));
+  const measure=pivot.dataHierarchies.add(pivot.hierarchies.getItem(report.measure));
+  measure.summarizeBy='Sum';
+  pivot.load('name');
+  pivot.rowHierarchies.load('items/name');
+  pivot.dataHierarchies.load('items/summarizeBy');
+  const body=pivot.layout.getDataBodyRange();
+  body.load('values');
+  await ctx.sync();
+  const got=body.values.flat();
+  const want=report.groups.map(g=>g.sum);
+  const near=(a,b)=>typeof a==='number' && Math.abs(a-b)<=1e-9*Math.max(1,Math.abs(b));
+  const ordered=[...want].sort((a,b)=>a-b);
+  const matches=rows=>rows.length===want.length && [...rows].sort((a,b)=>a-b)
+    .every((v,i)=>near(v,ordered[i]));
+  const totalsMatch=matches(got) || (got.length===want.length+1 &&
+    near(got.at(-1),want.reduce((a,b)=>a+b,0)) && matches(got.slice(0,-1)));
+  if (pivot.name!==pivotName || pivot.rowHierarchies.items[0]?.name!==report.dimension ||
+      pivot.dataHierarchies.items[0]?.summarizeBy!=='Sum' || !totalsMatch)
+    throw Error('The PivotTable was created but its output could not be verified. Inspect '+sheetName+' before retrying.');
+  return {description:sheetName+' · '+pivotName};
+}
+
 export async function apply(p) {
   const {action} = p;
   validate(action);
   return Excel.run(async ctx => {
     const {sheet,range,snapshot} = await loadSource(ctx,action);
     if (!equal(sourceState(snapshot),sourceState(p.snapshot))) throw Error('Source changed. Preview the operation again.');
+    if (action.kind==='pivot') return createPivot(ctx,range,snapshot,action);
+    if (action.kind==='nonnegative') {
+      await checkNonnegative(ctx,sheet,range,snapshot);
+      const validation=range.dataValidation;
+      validation.rule={decimal:{operator:'GreaterThanOrEqualTo',formula1:0}};
+      validation.ignoreBlanks=true;
+      validation.errorAlert={showAlert:true,style:'Stop',title:'Enter a non-negative number',message:'Enter zero or a positive number.'};
+      validation.load('type,rule,ignoreBlanks,errorAlert');range.load(properties);
+      await ctx.sync();
+      const rule=validation.rule?.decimal, threshold=rule?.formula1;
+      if (validation.type!=='Decimal'||rule?.operator!=='GreaterThanOrEqualTo'||
+          ![0,'0','=0'].includes(threshold)||!validation.ignoreBlanks||validation.errorAlert?.style!=='Stop'||
+          !validation.errorAlert?.showAlert||!equal(sourceState(read(range,sheet)),sourceState(snapshot)))
+        throw Error('Excel did not verify the validation rule. Inspect the range before retrying.');
+      return {description:sheet.name+'!'+action.address};
+    }
     if (['chart','dashboard'].includes(action.kind)) {
       if (!supported('1.10')) throw Error('Charts require ExcelApi 1.10.');
       const data = chartData(snapshot,action.type);
@@ -466,5 +541,36 @@ export async function rollback(recovery) {
     await ctx.sync();
     const restored = read(range,sheet);
     if (!equal(content(restored),content(before)) || !equal(restored.formats,before.formats)) throw Error('Undo could not be verified.');
+  });
+}
+
+// Long selections are loaded in bounded blocks. No cells are changed.
+export async function readDataset(signal,onProgress) {
+  return Excel.run(async ctx=>{
+    const range=ctx.workbook.getSelectedRange(), sheet=range.worksheet;
+    range.load('rowIndex,columnIndex,rowCount,columnCount');sheet.load('id,name,visibility');
+    await ctx.sync();
+    const {rowIndex:r,columnIndex:c,rowCount:rows,columnCount:columns}=range;
+    if (sheet.visibility!=='Visible') throw Error('Select a range on a visible worksheet.');
+    if (rows<2 || columns<1 || rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
+      throw Error('Select a header and data within 50,000 rows and 160,000 cells.');
+    const values=[],errors=[];
+    const blockSize=Math.max(1,Math.min(2000,Math.floor(8000/columns)));
+    let textSize=0;
+    for (let offset=0;offset<rows;offset+=blockSize) {
+      checkCancel(signal);
+      const block=sheet.getRange(a1(r+offset,c,Math.min(blockSize,rows-offset),columns));
+      block.load('values,valueTypes');await ctx.sync();
+      for (let i=0;i<block.values.length;i++) {
+        const row=block.values[i];
+        textSize+=row.reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
+        if (textSize>4000000) throw Error('This selection contains too much text. Choose fewer columns or rows.');
+        values.push(row);
+        errors.push(block.valueTypes[i].flatMap((v,j)=>v==='Error'?[j]:[]));
+      }
+      onProgress?.(values.length,rows);
+    }
+    checkCancel(signal);
+    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),values,errors};
   });
 }
