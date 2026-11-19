@@ -109,3 +109,26 @@ class GroqTests(unittest.TestCase):
             with self.assertRaises(server.GroqProtocolError) as error:
                 server.groq_reason(data,"test-key")
         self.assertEqual(error.exception.category,"explanation_requested_action")
+
+
+    def test_ranking_plan_discards_conflicting_generic_audit_and_finding(self):
+        request = {"question":"Analyse the Sales Audit worksheet. Rank every product category by total sales. "
+                    "Show the exact cells used for each calculation."}
+        mixed = plan(tool="AggregateData", intent="audit", finding=3, sheet="Sales Audit",
+                     dimension="Category", measure="Sales", operation="highest")
+        with patch.object(server,"urlopen",return_value=envelope(mixed)) as fetch:
+            with patch.object(server,"provider_diagnostic") as log:
+                result = server.groq_reason(request,"test-key","ranking-ref")
+        self.assertEqual(fetch.call_count,1)
+        self.assertEqual(result,dict(mixed,intent="none",finding=-1))
+        log.assert_called_once_with("groq_plan_normalized","ranking-ref","read_only_tool_conflict")
+
+    def test_mixed_write_intent_and_repeated_read_are_not_normalized(self):
+        for data, mixed in [
+            ({}, plan(tool="AggregateData", intent="style")),
+            ({"toolResult":{}}, plan(tool="AggregateData", intent="audit")),
+        ]:
+            with self.subTest(data=data), patch.object(server,"urlopen",side_effect=[envelope(mixed),envelope(mixed)]):
+                with self.assertRaises(server.GroqProtocolError) as failure:
+                    server.groq_reason(data,"test-key")
+                self.assertEqual(failure.exception.category,"invalid_tool_sequence")

@@ -93,7 +93,7 @@ def provider_diagnostic(event, reference, category, **counters):
     print(json.dumps({"event": event, "reference": reference, "category": category, **counters}), flush=True)
 
 
-def parse_groq_response(raw, pending_calculation, has_evidence, explanation_only=False):
+def parse_groq_response(raw, pending_calculation, has_evidence, explanation_only=False, reference=None):
     try:
         envelope = json.loads(raw)
     except (ValueError, UnicodeError) as error:
@@ -129,11 +129,22 @@ def parse_groq_response(raw, pending_calculation, has_evidence, explanation_only
     ):
         raise GroqProtocolError("invalid_tool_arguments")
     calculation_tool = pending_calculation and result["tool"] in ("AggregateData", "AnalyseColumn")
-    if result["tool"] != "none" and (result["intent"] != "none" or result["finding"] != -1
-            or (has_evidence and not calculation_tool)):
-        raise GroqProtocolError("invalid_tool_sequence")
     if explanation_only and (result["intent"] != "none" or result["tool"] != "none" or result["finding"] != -1):
         raise GroqProtocolError("explanation_requested_action")
+    if result["tool"] != "none":
+        if has_evidence and not calculation_tool:
+            raise GroqProtocolError("invalid_tool_sequence")
+        if result["intent"] != "none" or result["finding"] != -1:
+            if result["tool"] in ("AggregateData", "AnalyseColumn", "InspectWorkbook", "InspectWorksheet",
+                                  "InspectRange", "FindDuplicates", "AnalyseFormulas", "ExplainFormula") and result["intent"] in ("none", "audit"):
+                # A safe read tool takes precedence over unrelated generic audit or edit suggestions.
+                # The finding is never passed through to the workbook proposal path.
+                result["intent"] = "none"
+                result["finding"] = -1
+                if reference:
+                    provider_diagnostic("groq_plan_normalized", reference, "read_only_tool_conflict")
+            else:
+                raise GroqProtocolError("invalid_tool_sequence")
     return result
 
 
@@ -172,7 +183,7 @@ def groq_reason(data, key, reference=None):
         )
         with urlopen(request, timeout=8) as response:
             raw = response.read(1_000_000)
-        return parse_groq_response(raw, pending_calculation, "toolResult" in data, explanation_only)
+        return parse_groq_response(raw, pending_calculation, "toolResult" in data, explanation_only, reference)
 
     prior = None
     for attempt in range(2):
