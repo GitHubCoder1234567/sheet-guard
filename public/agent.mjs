@@ -187,9 +187,21 @@ function compoundRank(q) {
     worksheet:/\b(?:current|active|this) worksheet\b/i.test(q) && !/\b(?:selected|selection)\b/i.test(q)};
 }
 
+function namedWorksheetRanking(q) {
+  const ranking=/\brank\s+(?:every |each |all )?([^.!?;]+?)\s+by\s+(?:total\s+)?([^.!?;]+?)(?=[.!?;]|$)/i.exec(q);
+  if (!ranking) return null;
+  const named=/\b(?:analy[sz]e|inspect|review)\s+(?:the\s+)?(?:"([^"]+)"|“([^”]+)”|([^.!?;]+?))\s+worksheet\b/i.exec(q);
+  if (!named) return null;
+  const sheetName=(named[1]??named[2]??named[3]).trim();
+  const localScope=/^(?:the )?(?:current|active|this)$/i.test(sheetName);
+  return {kind:'rank',dimension:ranking[1].trim(),measure:ranking[2].trim(),operation:'highest',
+    worksheet:true,sheetName:localScope?null:sheetName,explainVerified:true,detailed:true,
+    normalised:/\b(?:case.insensitiv(?:e|ely)|ignore case|normalise whitespace|normalize whitespace)\b/i.test(q)};
+}
+
 export function localQuestion(question) {
   const q=question.trim().replace(/[.?!]+$/,'');
-  const compound=compoundRank(q);
+  const compound=namedWorksheetRanking(q)??compoundRank(q);
   if (compound) return compound;
   if (/^(?:what(?: is|'s) (?:the )?(?:(?:current|active) )?(?:worksheet|sheet)(?: called| name)?|name (?:the )?(?:active|current) (?:worksheet|sheet))$/i.test(q)) return {kind:'sheet'};
   if (/^(?:(?:find|show|list|check for|report) (?:the |all |any )?formula errors(?: in (?:this|the current) (?:sheet|worksheet))?)$/i.test(q))

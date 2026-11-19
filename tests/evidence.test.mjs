@@ -67,3 +67,13 @@ test('format observations block explicitly mixed measure currencies, not unrelat
   const mixed=structuredClone(fixture);mixed.formats[7][4]='USD 0';
   assert.throws(()=>rankedAnalysis(intent,mixed),/more than one currency/);
 });
+
+test('imperative named-sheet ranking resolves the user’s exact query before cloud tool selection',()=>{
+  const query='Analyse the Sales Audit worksheet. Rank every product category by total sales. Show the exact cells used for each calculation.';
+  const intent=localQuestion(query);
+  assert.equal(intent.sheetName,'Sales Audit');
+  assert.equal(intent.explainVerified,true);
+  const result=rankedAnalysis(intent,fixture);
+  assert.equal(result.groups[0].sum,4780);
+  assert.deepEqual(result.evidence.groups[0].records.map(r=>r.measureCell),['E2','E3']);
+});

@@ -1,5 +1,5 @@
 import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
-import {selectEvidenceRange, activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
+import {visibleWorksheetByName, selectEvidenceRange, activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
 import {aggregationEvidence, sameEvidence, evidenceIntent, evidenceGroup, foldLabel} from './evidence.mjs';
 import {calculationGoal, calculatesGoal, datasetAnswer, executeTool, explicitAudit, localQuestion, rankedAnalysis} from './agent.mjs';
@@ -597,6 +597,7 @@ function chatView() {
   for (const m of state.messages.slice(-18)) {
     const item=block(node('div',m.role==='user'?'You':'Forma','meta'),node('p',m.text,'chat'));
     if (m.report) item.append(rankingTable(m));
+    if (m.explanation) item.append(node('p',m.explanation,'muted'));
     if (m.rows) item.append(evidenceRows(m));
     if (m.proposal && !state.dismissed.has(m.proposal.id)) item.append(button('Review proposal',()=>{
       state.filter='All';setTab('Recommendations');}));
@@ -841,7 +842,7 @@ async function answerLocal(question,intent) {
       (errors.length>12?' (first 12 shown).':'.'):'No Excel error values found in '+scope+'.')+
       (snapshot?.partial?' This was a bounded sample.':'');
   } else if (['count','columns','rank'].includes(intent.kind)) {
-    const sheet=intent.worksheet?await activeWorksheet():null;
+    const sheet=intent.sheetName?await visibleWorksheetByName(intent.sheetName):intent.worksheet?await activeWorksheet():null;
     const data=await captureDataset(sheet?{sheetId:sheet.id,used:true}:undefined,true,intent.kind==='rank');
     if (intent.kind==='rank') {
       report=rankedAnalysis({...intent,sessionId:state.sessionId},data);
@@ -868,7 +869,25 @@ async function answerLocal(question,intent) {
     reply=s.name+'!'+s.address+'\n'+description+'\n\n'+expression+'\nCurrent result: '+s.display[0][0]+
       (refs.length?'\nReferences: '+refs.join(', '):'');
   }
-  state.messages.push({role:'assistant',text:reply,report});return '';
+  const message={role:'assistant',text:reply,report};
+  state.messages.push(message);
+  if (report && intent.explainVerified && state.consent) {
+    notice.textContent='Calculations verified. Preparing an optional explanation…';
+    render();
+    const {operation,grouping,coverage,counts}=report.evidence;
+    try {
+      const answer=await requestAgent({question:'Explain the verified grouping and summation method and its limitations.',
+        toolResult:{verifiedCalculation:{operation,grouping,coverage,counts,groupCount:report.groups.length}}});
+      if (answer.intent!=='none' || answer.finding!==-1 || (answer.tool && answer.tool!=='none') ||
+          /[0-9]/.test(answer.reply) || answer.reply.length>600)
+        throw Error('Groq returned an explanation that could not be verified.');
+      message.explanation='AI explanation · '+answer.reply;
+    } catch(error) {
+      message.explanation='The verified totals and source cells are above. AI explanation unavailable. '+
+        (error.name==='AbortError'?'The explanation timed out.':error.message);
+    }
+  }
+  return '';
 }
 async function requestAgent(payload) {
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),22000);
@@ -887,7 +906,9 @@ async function requestAgent(payload) {
     }
     const data=await response.json().catch(()=>null);
     if (!response.ok) {
-      if (data && typeof data.error==='string' && data.error.trim()) throw Error(data.error);
+      if (data && typeof data.error==='string' && data.error.trim())
+        throw Error(data.error+(typeof data.reference==='string' && /^[0-9a-f]{12}$/.test(data.reference)?
+          ' Reference '+data.reference+'.':''));
       if (response.status===401) throw Error('Enter the deployment access password in Forma Settings.');
       if (response.status===429) throw Error('The AI service is rate limited. Wait a moment and try again.');
       throw Error('The AI service returned HTTP '+response.status+'. Try again shortly.');

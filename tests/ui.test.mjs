@@ -373,13 +373,35 @@ test('Sales Audit chat carries the Electronics ledger through variants, preview,
     window.Excel={run:fn=>fn({workbook:wb,sync:async()=>{}})};
     window.changeSale=()=>{data.values[1][4]=4000;data.display[1][4]='AUD 4000';};
   `;
-  const {page,errors}=await fixture(t,excel,()=>{throw Error('Ledger requests must stay local');});
+  let explanations=0;
+  const {page,errors}=await fixture(t,excel,payload=>{
+    explanations++;
+    assert.deepEqual(Object.keys(payload).sort(),['question','toolResult']);
+    assert.equal(payload.toolResult.verifiedCalculation.operation,'sum');
+    assert(!JSON.stringify(payload).includes('SG-1001'));
+    return explanations===1?{status:502,json:{error:'Groq reached its output limit.',code:'truncated',reference:'aabbccddeeff'}}:
+      {reply:'The calculation adds eligible sales by exact category label. A blank sales cell is excluded.',
+        intent:'none',option:'default',finding:-1,tool:'none'};
+  });
   const say=async text=>{
     await page.getByRole('textbox',{name:'Workbook question'}).fill(text);
     await page.getByRole('button',{name:'Send',exact:true}).click();
   };
   await say('Which product category has the highest sales? Show the exact calculations and source rows.');
   await page.getByText('Highest total Sales: Electronics · 4,780',{exact:false}).waitFor();
+  assert.equal(explanations,0);
+  await openView(page,'Settings');
+  await page.getByRole('checkbox',{name:'Allow AI data sharing for this session'}).check();
+  await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+  const exact='Analyse the Sales Audit worksheet. Rank every product category by total sales. Show the exact cells used for each calculation.';
+  await say(exact);
+  await page.getByText('Groq reached its output limit.',{exact:false}).waitFor();
+  assert.equal(explanations,1);
+  await page.getByText('Highest total Sales: Electronics · 4,780',{exact:false}).last().waitFor();
+  assert.equal(await page.getByRole('alert').count(),0);
+  await say(exact);
+  await page.getByText('AI explanation · The calculation adds eligible sales by exact category label.',{exact:false}).waitFor();
+  assert.equal(explanations,2);
   await say('Where exactly did 4,780 come from?');
   await page.getByText('3400 + 1380 = 4780',{exact:false}).waitFor();
   await page.getByText('Sales Audit!B2 · Electronics / Sales Audit!E2 = 3400 · A2 SG-1001',{exact:true}).waitFor();

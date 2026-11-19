@@ -652,3 +652,16 @@ export async function selectEvidenceRange(sheetId,address) {
     sheet.activate();range.select();await ctx.sync();
   });
 }
+
+
+export async function visibleWorksheetByName(name) {
+  return Excel.run(async ctx=>{
+    const collection=ctx.workbook.worksheets;
+    collection.load('items/id,items/name,items/visibility');
+    await ctx.sync();
+    const sheet=collection.items.find(s=>s.name.toLowerCase()===name.toLowerCase());
+    if (!sheet || sheet.visibility!=='Visible')
+      throw Error('Forma could not find a visible worksheet named “'+name+'”. Check the sheet name and try again.');
+    return {id:sheet.id,name:sheet.name};
+  });
+}

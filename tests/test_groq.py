@@ -79,3 +79,33 @@ class GroqTests(unittest.TestCase):
         with patch.object(server, "urlopen", return_value=envelope(plan(tool="InspectRange"))):
             with self.assertRaises(ValueError):
                 server.groq_reason(data, "test-key")
+
+    def test_truncated_reply_retries_with_more_room_and_safe_logging(self):
+        data={"question":"Analyse the Sales Audit worksheet. Rank every product category by total sales. Show the exact cells used for each calculation."}
+        expected=plan(tool="AggregateData",sheet="Sales Audit",measure="Sales",dimension="Category",operation="highest")
+        with patch.object(server,"urlopen",side_effect=[envelope(plan(), "length"),envelope(expected)]) as fetch:
+            with patch.object(server,"provider_diagnostic") as diagnostic:
+                self.assertEqual(server.groq_reason(data,"secret-provider-key","test-reference"),expected)
+                diagnostic.assert_called_once_with("groq_retry","test-reference","truncated",attempt=1)
+        self.assertEqual(fetch.call_count,2)
+        self.assertEqual(json.loads(fetch.call_args.args[0].data)["max_completion_tokens"],4096)
+
+    def test_invalid_content_json_retries_once_and_reports_a_safe_reason(self):
+        raw=lambda: io.BytesIO(b'{"choices":[{"finish_reason":"stop","message":{"content":"not-json"}}]}')
+        config={"AI_PROVIDER":"groq","GROQ_API_KEY":"fake-credential"}
+        with patch.dict(os.environ,config,clear=True), patch.object(server,"urlopen",side_effect=[raw(),raw()]) as fetch:
+            with patch.object(server,"provider_diagnostic") as log:
+                request=CaptureHandler(b'{"question":"Sales Audit private prompt"}')
+                request.do_POST()
+        self.assertEqual(fetch.call_count,2)
+        self.assertEqual(request.response[0],502)
+        self.assertEqual(request.response[1]["code"],"invalid_content_json")
+        self.assertNotIn("private prompt",str(log.call_args_list))
+        self.assertNotIn("fake-credential",str(log.call_args_list))
+
+    def test_verified_explanation_cannot_launch_tools_or_edits(self):
+        data={"question":"Explain method","toolResult":{"verifiedCalculation":{"operation":"sum"}}}
+        with patch.object(server,"urlopen",side_effect=[envelope(plan(intent="style")),envelope(plan(intent="style"))]):
+            with self.assertRaises(server.GroqProtocolError) as error:
+                server.groq_reason(data,"test-key")
+        self.assertEqual(error.exception.category,"explanation_requested_action")
