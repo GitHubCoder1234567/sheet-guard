@@ -90,7 +90,8 @@ def groq_reason(data, key):
                 "name": "forma_plan", "strict": True, "schema": GROQ_SCHEMA,
             }},
         }).encode(),
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                 "Accept": "application/json", "User-Agent": "Forma/3.0"},
         method="POST",
     )
     with urlopen(request, timeout=15) as response:
@@ -169,6 +170,36 @@ def reason(data, key):
     raise ValueError("The model did not return a complete plan. Try a narrower question.")
 
 
+def groq_denial_category(error):
+    try:
+        raw = error.read(8192)
+        data = json.loads(raw)
+        details = data.get("error", {}) if isinstance(data, dict) else {}
+        code = details.get("code") if isinstance(details, dict) else None
+        if code in ("model_permission_denied", "model_not_found", "model_decommissioned"):
+            return "model-access"
+        if code in ("invalid_api_key", "invalid_authentication", "organization_restricted"):
+            return "credential-or-project"
+        return "api-json"
+    except (ValueError, TypeError, AttributeError, OSError):
+        return "edge-html" if "text/html" in (error.headers or {}).get("Content-Type", "") else "non-json"
+
+
+def groq_models_status(key):
+    request = Request("https://api.groq.com/openai/v1/models", headers={
+        "Authorization": "Bearer " + key, "Accept": "application/json", "User-Agent": "Forma/3.0",
+    })
+    try:
+        with urlopen(request, timeout=10) as response:
+            envelope = json.loads(response.read(1_000_000))
+        active = any(item.get("id") == os.getenv("AI_MODEL", GROQ_MODEL) for item in envelope.get("data", []))
+        return "model-listed" if active else "model-not-listed"
+    except HTTPError as error:
+        return "models-http-" + str(error.code) + "-" + groq_denial_category(error)
+    except (ValueError, TypeError, AttributeError, TimeoutError, URLError):
+        return "models-unavailable"
+
+
 def verify_groq_startup():
     """Run an explicitly enabled staging check without workbook data or secret output."""
     provider, key = provider_config()
@@ -180,6 +211,8 @@ def verify_groq_startup():
             outcome = "passed" if result["tool"] == "none" and result["intent"] == "none" and result["finding"] == -1 else "unexpected-plan"
         except HTTPError as error:
             outcome = "http-" + str(error.code)
+            if error.code in (401, 403):
+                outcome += "-" + groq_denial_category(error) + "-" + groq_models_status(key)
         except (TimeoutError, URLError):
             outcome = "timeout-or-network"
         except (ValueError, TypeError):
@@ -264,8 +297,13 @@ class Handler(SimpleHTTPRequestHandler):
             except HTTPError as error:
                 if error.code == 429:
                     return self.respond(429, {"error": "The AI provider rate limit was reached. Wait a moment and try again."})
-                if error.code in (401, 403):
+                if error.code == 401:
                     return self.respond(503, {"error": "The AI provider rejected its credentials. Ask your administrator to check the server key."})
+                if error.code == 403:
+                    hint = " Check the provider project's key and model permissions."
+                    if provider == "groq" and groq_denial_category(error) == "edge-html":
+                        hint = " Groq’s network gateway rejected the request from the hosting service."
+                    return self.respond(503, {"error": "The AI provider denied access (HTTP 403)." + hint})
                 if error.code in (400, 404):
                     return self.respond(502, {"error": "The AI provider rejected the request. Ask your administrator to check model availability and configuration."})
                 return self.respond(502, {"error": "The AI provider is temporarily unavailable. Try again shortly."})

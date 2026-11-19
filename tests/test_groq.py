@@ -63,8 +63,8 @@ class GroqTests(unittest.TestCase):
             unauth=CaptureHandler(data)
             unauth.do_POST()
             self.assertEqual(unauth.response[0],401)
-            for upstream,expected in [(401,503),(404,502),(429,429),(503,502)]:
-                failure=HTTPError("https://api.groq.com/",upstream,"fake-test-key",{},None)
+            for upstream,expected in [(401,503),(403,503),(404,502),(429,429),(503,502)]:
+                failure=HTTPError("https://api.groq.com/",upstream,"fake-test-key",{},io.BytesIO(b"{}"))
                 req=CaptureHandler(data,Authorization="Basic c2hlZXRndWFyZDp0ZXN0")
                 with patch.object(server,"groq_reason",side_effect=failure):
                     req.do_POST()
