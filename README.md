@@ -40,3 +40,11 @@ Redeploy after saving. In Forma Settings, enable AI data sharing and enter the d
 Groq strict structured output returns an allowlisted plan. Forma dispatches the selected workbook tool locally. Workbook inspection can make one bounded follow-up call. Exact totals, counts, duplicate groups, and column statistics are computed locally and shown with references. Chart, style and dashboard requests create proposals through the existing approval flow. [Groq structured-output documentation](https://console.groq.com/docs/structured-outputs)
 
 Aggregation and duplicate analysis cover the selected contiguous data range (or a single cell's surrounding region when supported) within the documented size limits. Worksheet inspection and formula evidence use bounded samples. A keyed comparison needs two explicit captures. Larger, ambiguous, hidden, or unsupported ranges can require a more specific selection.
+
+## Forma 4 evidence increment
+
+Ask **Which product category has the highest sales?**, then ask **Where did the total come from?** or select a category in the ranked table. Forma keeps source rows in the current pane session, re-reads the source before answering a follow-up, and navigates using selection only. Ask **Group categories case-insensitively** to explicitly combine case and whitespace variants. The original exact analysis keeps variants separate.
+
+On supported Excel hosts, **Fix the inconsistent category labels** can prepare a single literal-cell normalization from the latest verified report. Review the preview and approve it explicitly. The verified edit can be reversed in History. Calculations include rows inside the requested range regardless of filters or hiding.
+
+The fixture is `tests/fixtures/sales-audit.json`. Include `tests/evidence.test.mjs` in the Node test command. See [architecture audit](docs/forma-4-audit.md) and [the release and deployment notes](docs/forma-4-release.md).

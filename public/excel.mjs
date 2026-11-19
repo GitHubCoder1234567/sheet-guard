@@ -174,6 +174,16 @@ async function checkNonnegative(ctx,sheet,range,snapshot) {
     throw Error('Select numeric cells without headers or existing negative values.');
 }
 
+async function checkLabel(ctx,range,snapshot,expected) {
+  const tables=range.getTables(false);
+  tables.load('items/name');
+  range.dataValidation.load('type');
+  await ctx.sync();
+  if (tables.items.length || range.dataValidation.type!=='None' || snapshot.types[0][0]!=='String' ||
+      formula(snapshot,0,0) || snapshot.values[0][0]!==expected)
+    throw Error('The category cell changed or is not editable. Forma only normalises unvalidated literal cells outside Excel tables.');
+}
+
 export async function preview(action) {
   validate(action);
   return Excel.run(async ctx => {
@@ -191,8 +201,9 @@ export async function preview(action) {
       await assertVisible(ctx,range);
       report=pivotPreview(snapshot,action);
     }
-    if (['style','number','trim'].includes(action.kind)) await writable(ctx,sheet,range,true);
+    if (['style','number','trim','normalizeLabel'].includes(action.kind)) await writable(ctx,sheet,range,true);
     if (action.kind==='trim') await checkTrim(ctx,range,snapshot);
+    if (action.kind==='normalizeLabel') await checkLabel(ctx,range,snapshot,action.before);
     if (action.kind==='style') {
       loadStyle(range);
       await ctx.sync();
@@ -485,6 +496,10 @@ export async function apply(p) {
       if (!equal(styleState(range),p.currentStyle)) throw Error('The source style changed. Preview the change again.');
       nextStyle = headingStyle(action);
       setStyle(range,nextStyle);
+    } else if (action.kind==='normalizeLabel') {
+      await checkLabel(ctx,range,snapshot,action.before);
+      trimmed=action.value;
+      range.values=[[trimmed]];
     } else if (action.kind==='trim') {
       trimmed=await checkTrim(ctx,range,snapshot);
       range.values=[[trimmed]];
@@ -499,7 +514,7 @@ export async function apply(p) {
     await ctx.sync();
     const after = read(range,sheet);
     const verified = action.kind === 'formula' ? after.r1c1[0][0] === action.value && after.types[0][0] !== 'Error'
-      : action.kind==='trim'?after.values[0][0]===trimmed && after.types[0][0]==='String' &&
+      : ['trim','normalizeLabel'].includes(action.kind)?after.values[0][0]===trimmed && after.types[0][0]==='String' &&
         !formula(after,0,0) && equal(after.formats,snapshot.formats)
       : equal(content(snapshot),content(after)) && (action.kind === 'number'
         ? after.formats.every(row=>row.every(value=>value===action.value))
@@ -526,6 +541,11 @@ export async function rollback(recovery) {
     await writable(ctx,sheet,range,true);
     if (!equal(sourceState(snapshot),sourceState(after))) throw Error('The range changed after applying the operation. Undo was skipped.');
     if (action.kind === 'number') range.numberFormat = before.formats;
+    else if (action.kind==='normalizeLabel') {
+      validate(action);
+      await checkLabel(ctx,range,snapshot,action.value);
+      range.values=before.values;
+    }
     else if (action.kind==='trim') {
       const tables=range.getTables(false);
       tables.load('items/name');
@@ -546,7 +566,7 @@ export async function rollback(recovery) {
 }
 
 // Long selections are loaded in bounded blocks. No cells are changed.
-export async function readDataset(signal,onProgress,target,expand=false) {
+export async function readDataset(signal,onProgress,target,expand=false,evidence=false) {
   return Excel.run(async ctx=>{
     if (target?.address) rect(target.address,DATASET_CELL_LIMIT);
     const worksheet=target?ctx.workbook.worksheets.getItem(target.sheetId):null;
@@ -565,16 +585,21 @@ export async function readDataset(signal,onProgress,target,expand=false) {
     if (sheet.visibility!=='Visible') throw Error('Select a range on a visible worksheet.');
     if (rows<2 || columns<1 || rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
       throw Error('Select a header and data within 50,000 rows and 160,000 cells.');
-    const values=[],errors=[];
+    const values=[],errors=[],display=[],formats=[];
     const blockSize=Math.max(1,Math.min(2000,Math.floor(8000/columns)));
     let textSize=0;
     for (let offset=0;offset<rows;offset+=blockSize) {
       checkCancel(signal);
       const block=sheet.getRange(a1(r+offset,c,Math.min(blockSize,rows-offset),columns));
-      block.load('values,valueTypes');await ctx.sync();
+      block.load(evidence?'values,valueTypes,text,numberFormat':'values,valueTypes');await ctx.sync();
       for (let i=0;i<block.values.length;i++) {
         const row=block.values[i];
         textSize+=row.reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
+        if (evidence) {
+          const text=block.text?.[i]??[],format=block.numberFormat?.[i]??[];
+          display.push(text);formats.push(format);
+          textSize+=text.concat(format).reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
+        }
         if (textSize>4000000) throw Error('This selection contains too much text. Choose fewer columns or rows.');
         values.push(row);
         errors.push(block.valueTypes[i].flatMap((v,j)=>v==='Error'?[j]:[]));
@@ -582,7 +607,7 @@ export async function readDataset(signal,onProgress,target,expand=false) {
       onProgress?.(values.length,rows);
     }
     checkCancel(signal);
-    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),values,errors};
+    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),values,errors,...(evidence?{display,formats}:{})};
   });
 }
 
@@ -610,5 +635,20 @@ export async function activeWorksheet() {
     sheet.load('id,name');
     await ctx.sync();
     return {id:sheet.id,name:sheet.name};
+  });
+}
+
+
+export async function selectEvidenceRange(sheetId,address) {
+  rect(address,DATASET_CELL_LIMIT);
+  return Excel.run(async ctx=>{
+    const sheet=ctx.workbook.worksheets.getItem(sheetId);
+    sheet.load('visibility');
+    await ctx.sync();
+    if (sheet.visibility!=='Visible') throw Error('This source worksheet is hidden.');
+    const range=sheet.getRange(address);
+    if (typeof sheet.activate!=='function'||typeof range.select!=='function')
+      throw Error('Excel cannot navigate to the source from this host.');
+    sheet.activate();range.select();await ctx.sync();
   });
 }

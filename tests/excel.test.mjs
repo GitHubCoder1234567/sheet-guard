@@ -183,3 +183,20 @@ test('validation preview performs no write; apply verifies a native rule and rej
   await assert.rejects(preview(action),/already has a validation rule/);
   assert.equal(workbook.values[1][1],2);
 });
+
+test('single-label normalization previews, verifies and reverses without changing the measure',async()=>{
+  const workbook=host();
+  workbook.values[3][0]=workbook.formulas[3][0]=workbook.r1c1[3][0]='electronics';
+  const action={kind:'normalizeLabel',sheetId:'s',address:'A4',before:'electronics',value:'Electronics'};
+  const proposal=await preview(action);
+  assert.equal(workbook.writes(),0);
+  const result=await apply(proposal);
+  assert.equal(workbook.values[3][0],'Electronics');
+  assert.equal(workbook.values[3][1],2);
+  await rollback(result.recovery);
+  assert.equal(workbook.values[3][0],'electronics');
+  await assert.rejects(preview({...action,value:'Another category'}),/single literal/);
+  const fresh=await preview(action);
+  workbook.values[3][0]=workbook.formulas[3][0]=workbook.r1c1[3][0]='Electronics';
+  await assert.rejects(apply(fresh),/Source changed/);
+});

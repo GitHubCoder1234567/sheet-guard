@@ -333,6 +333,12 @@ export function validate(action) {
     const labels=[action.measure,action.dimension];
     if (bounds.rows<2 || bounds.columns<2 || labels.some(v=>typeof v!=='string' || !v.trim() || v.length>120) ||
         action.measure.toLowerCase()===action.dimension.toLowerCase()) throw Error('Choose two report fields.');
+  } else if (action.kind==='normalizeLabel') {
+    const safe=v=>typeof v==='string'&&v.length<=120&&/^[A-Za-z]/.test(v.trim());
+    const fold=v=>v.trim().replace(/\s+/gu,' ').toLowerCase();
+    if (bounds.rows!==1||bounds.columns!==1||!safe(action.before)||!safe(action.value)||
+        action.before===action.value||fold(action.before)!==fold(action.value))
+      throw Error('Only a single literal case or whitespace variant can be normalised.');
   } else if (action.kind === 'trim') {
     if (bounds.rows!==1 || bounds.columns!==1) throw Error('Text cleanup is limited to one cell.');
   } else if (action.kind === 'number') {

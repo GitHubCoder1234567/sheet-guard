@@ -343,3 +343,70 @@ test('cleaning keeps the cleaning view, while unsupported statistics explain the
   await q.fill('Calculate median revenue in this worksheet');await send.click();
   await page.getByRole('alert').getByText('Forma cannot verify that statistic',{exact:false}).waitFor();
 });
+
+test('Sales Audit chat carries the Electronics ledger through variants, preview, approval, undo and stale evidence',async t=>{
+  const data=JSON.parse(await readFile(new URL('./fixtures/sales-audit.json',import.meta.url)));
+  const excel=`
+    const data=${JSON.stringify(data)}, writes=window.auditWrites=[];
+    const noop=()=>{};
+    function make(address='A1:H17'){
+      const [,left,top,right=left,bottom=top]=/^([A-Z])(\\d+)(?::([A-Z])(\\d+))?$/.exec(address);
+      const r=Number(top)-1,c=left.charCodeAt(0)-65,rows=Number(bottom)-r,columns=right.charCodeAt(0)-64-c;
+      const subset=matrix=>matrix.slice(r,r+rows).map(row=>row.slice(c,c+columns));
+      return {worksheet:sheet,rowIndex:r,columnIndex:c,rowCount:rows,columnCount:columns,
+        load:noop,select(){window.auditSelected=address;},rowHidden:false,columnHidden:false,hasSpill:false,
+        getMergedAreasOrNullObject(){return {isNullObject:true,load:noop};},
+        getTables(){return {load:noop,items:[]};},dataValidation:{load:noop,type:'None'},
+        get values(){return subset(data.values);},
+        set values(value){data.values[r][c]=value[0][0];data.display[r][c]=String(value[0][0]);writes.push([address,value[0][0]]);},
+        get formulas(){return subset(data.values);},get formulasR1C1(){return subset(data.values);},
+        get numberFormat(){return subset(data.formats);},get text(){return subset(data.display);},
+        get valueTypes(){return subset(data.values.map((row,i)=>row.map((v,j)=>data.errors[i].includes(j)?'Error':typeof v==='number'?'Double':v===''?'Empty':'String')));}
+      };
+    }
+    const sheet={name:data.sheet,id:data.sheetId,visibility:'Visible',load:noop,activate:noop,
+      protection:{load:noop,protected:false},charts:{load:noop,items:[]},
+      getUsedRangeOrNullObject(){return make();},getRange:make};
+    const wb={getSelectedRange:()=>make(),worksheets:{load:noop,items:[sheet],getItem:()=>sheet,getActiveWorksheet:()=>sheet}};
+    window.Office={HostType:{Excel:'Excel'},onReady:fn=>Promise.resolve(fn({host:'Excel'})),
+      context:{requirements:{isSetSupported:()=>true}}};
+    window.Excel={run:fn=>fn({workbook:wb,sync:async()=>{}})};
+    window.changeSale=()=>{data.values[1][4]=4000;data.display[1][4]='AUD 4000';};
+  `;
+  const {page,errors}=await fixture(t,excel,()=>{throw Error('Ledger requests must stay local');});
+  const say=async text=>{
+    await page.getByRole('textbox',{name:'Workbook question'}).fill(text);
+    await page.getByRole('button',{name:'Send',exact:true}).click();
+  };
+  await say('Which product category has the highest sales? Show the exact calculations and source rows.');
+  await page.getByText('Highest total Sales: Electronics · 4,780',{exact:false}).waitFor();
+  await say('Where exactly did 4,780 come from?');
+  await page.getByText('3400 + 1380 = 4780',{exact:false}).waitFor();
+  await page.getByText('Sales Audit!B2 · Electronics / Sales Audit!E2 = 3400 · A2 SG-1001',{exact:true}).waitFor();
+  await page.getByText('Sales Audit!B3 · Electronics / Sales Audit!E3 = 1380 · A3 SG-1002',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Select E2',exact:true}).click();
+  assert.equal(await page.evaluate(()=>window.auditSelected),'E2');
+  await page.getByRole('button',{name:'Return to previous selection'}).click();
+  assert.equal(await page.evaluate(()=>window.auditSelected),'A1:H17');
+  await say('But there is also lowercase electronics.');
+  await page.getByText('combined total is 6905',{exact:false}).waitFor();
+  await page.getByText('Sales Audit!B4 · electronics / Sales Audit!E4 = 2125',{exact:false}).waitFor();
+  await say('Fix the inconsistent category labels.');
+  await page.getByRole('button',{name:'Review proposal'}).click();
+  const card=page.locator('article').filter({has:page.getByRole('button',{name:'Standardise category label',exact:true})});
+  await card.getByRole('button',{name:'Preview',exact:true}).click();
+  await card.getByText('Before · "electronics"',{exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.auditWrites),[]);
+  await card.getByRole('button',{name:'Apply changes',exact:true}).click();
+  await page.getByText('Change verified in Excel.',{exact:true}).waitFor();
+  await openView(page,'History');
+  page.once('dialog',d=>d.accept());
+  await page.getByRole('button',{name:'Undo verified change'}).click();
+  await page.getByText('Undo verified in Excel.',{exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.auditWrites),[['B4','Electronics'],['B4','electronics']]);
+  await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+  await page.evaluate(()=>window.changeSale());
+  await say('Show me the rows behind the total.');
+  await page.getByRole('alert').getByText('The source cells changed',{exact:false}).waitFor();
+  assert.deepEqual(errors,[]);
+});

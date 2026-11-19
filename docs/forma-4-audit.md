@@ -1,0 +1,12 @@
+# Forma 4 engineering audit
+
+Baseline reviewed: Forma 3 branch at 43bda0f. The manifest loads the hosted task pane. Render starts the Python static-file server and Groq broker. The service has a shared access password, bounded requests, strict provider output, and a concurrency cap. Consent gates model calls separately from workbook edit approvals.
+
+- `public/excel.mjs` batches Office.js reads. Preview/apply compares snapshots, checks host capability and worksheet safety, and verifies resulting cells or objects. Formula, number-format and literal-text writes have session undo. Charts, dashboards, PivotTables, conditional formatting, styles and validation do not have a general add-in undo.
+- `public/engine.mjs` computes deterministic aggregates and findings. `public/agent.mjs` routes calculations locally but rankings return totals and counts with column ranges. They discard row membership. `public/app.mjs` sends bounded plain-text chat history, so a follow-up about 4,780 can be interpreted as a request to find a literal cell value. A model reply can still describe numbers without a deterministic contract when a paraphrase misses the numerical intent guard.
+- `public/plot.mjs` draws chart previews. Visual proposals already support explicit apply and decline. Preview varies by operation, existing charts are only approximately rendered in the pane, and single-cell text edits exclude Excel tables.
+- `public/style.css` supports a narrow pane and existing controls. Detailed evidence should stay collapsed by default and use the same native range navigation as findings. Current app state is in-memory per pane.
+- `server.py` limits tool sequences and validates Groq output. Workbook data is untrusted. Consent still permits bounded cell samples and conversation to reach Render and Groq. The shared deployment password is suitable for staged access and is not per-user production identity.
+- The Dockerfile, README, manifest generator and tests support existing Render deployment, Office manifest validation and simulated Excel browser tests. Real Excel availability must be checked separately. The production and working staging deployments are outside this PR's deployment scope.
+
+First increment: retain a structured local source-record ledger, calculate exact and opt-in normalized totals, resolve follow-ups from their calculation context, and verify a scoped normalization proposal and reversal.

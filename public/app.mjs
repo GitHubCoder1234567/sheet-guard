@@ -1,13 +1,14 @@
 import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
-import {activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
+import {selectEvidenceRange, activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
+import {aggregationEvidence, sameEvidence, evidenceIntent, evidenceGroup, foldLabel} from './evidence.mjs';
 import {calculationGoal, calculatesGoal, datasetAnswer, executeTool, explicitAudit, localQuestion, rankedAnalysis} from './agent.mjs';
 
 const nav = document.querySelector('#nav'), main = document.querySelector('#main');
 const notice = document.querySelector('#notice'), connection = document.querySelector('#connection');
 const tabs = ['Audit','Recommendations','Visualisations','History','Settings'];
 const state = {
-  tab:'Chat', workspaceMode:null, menuOpen:false, ready:false, busy:false, findings:[], snapshots:[], dismissed:new Set(),
+  sessionId:globalThis.crypto?.randomUUID?.()??'forma-'+Date.now(), tab:'Chat', workspaceMode:null, menuOpen:false, ready:false, busy:false, findings:[], snapshots:[], dismissed:new Set(),
   previews:new Map(), edits:new Map(), checked:new Set(), history:[], messages:[],
   filter:'All', sort:'Severity', query:'', selected:null, inspected:new Map(), explanation:new Set(),
   previewMode:new Map(), clarified:new Map(), batchReview:false, lastScan:null, sheets:[], monitor:null, consent:false, draft:'', scanned:false, manualKind:'chart', accessPassword:'',
@@ -155,11 +156,11 @@ function auditView() {
 }
 
 const labels={chart:'Create chart',dashboard:'Create dashboard',style:'Style headings',number:'Change number display',
-  formula:'Repair formula',pivot:'Create PivotTable',nonnegative:'Prevent negative values',trim:'Trim text whitespace',negative:'Highlight negatives',heatmap:'Apply a colour scale',dataBar:'Add data bars'};
+  formula:'Repair formula',normalizeLabel:'Standardise category label',pivot:'Create PivotTable',nonnegative:'Prevent negative values',trim:'Trim text whitespace',negative:'Highlight negatives',heatmap:'Apply a colour scale',dataBar:'Add data bars'};
 const numberFormats={percent:'0.0%',decimal:'#,##0.00',date:'yyyy-mm-dd',integer:'0'};
 function manualPanel(visual) {
   const card=block(node('h3','From the current selection'));
-  const options=Object.entries(labels).filter(([kind])=>!['formula','trim','pivot','nonnegative'].includes(kind) && (!visual || ['chart','dashboard','heatmap','dataBar'].includes(kind)));
+  const options=Object.entries(labels).filter(([kind])=>!['formula','trim','pivot','nonnegative','normalizeLabel'].includes(kind) && (!visual || ['chart','dashboard','heatmap','dataBar'].includes(kind)));
   const kind=select(options,options.some(([v])=>v===state.manualKind)?state.manualKind:options[0][0]);
   kind.addEventListener('change',()=>{state.manualKind=kind.value;state.toolsOpen=kind.closest('details')?.open;render();});
   const option=kind.value==='number'?select(Object.keys(numberFormats).map(k=>[k,k]),'percent'):
@@ -435,6 +436,12 @@ function customisation(f) {
 function previewPanel(p,id) {
   const section=node('section',undefined,'details'), {action:a,snapshot:s,data}=p;
   section.append(node('h3','Change preview'),node('p',s.name+'!'+a.address,'address'));
+  if (a.kind==='normalizeLabel') {
+    section.append(node('p','One literal category cell will change. Sales values, formulas and formatting are preserved.'),
+      node('p','Before · '+JSON.stringify(a.before)),node('p','After · '+JSON.stringify(a.value)),
+      node('p','Changing a label can regroup this record in reports. You can undo the verified change from History.','muted'));
+    return section;
+  }
   if (a.kind==='nonnegative') {
     section.append(node('p','Keep current values. Future entries must be zero or greater. Blank cells remain allowed.'),
       node('p','Excel will display a Stop alert when a typed entry fails this rule. No existing rule will be replaced.','muted'));
@@ -555,7 +562,17 @@ function chatView() {
     if (/^create (?:a )?pivot\s*table for total .+ by .+[.!]?$/i.test(q)) {
       state.draft='';run(()=>preparePivot(q),'Preparing report…');return;
     }
+    if (/^undo (?:it|that|the last change)[.!]?$/i.test(q)) {
+      state.draft='';
+      state.chatError='';
+      setTab('History');
+      return;
+    }
+    const evidenceRequest=evidenceIntent(q);
     const local=localQuestion(q);
+    if (evidenceRequest && (!local || (state.evidence && evidenceRequest==='normalise'))) {
+      run(()=>submitQuestion(q,()=>answerEvidence(q,evidenceRequest)),'Checking source evidence…');return;
+    }
     if (local) {
       run(()=>submitQuestion(q,()=>answerLocal(q,local)),'Reading workbook…');return;
     }
@@ -580,6 +597,7 @@ function chatView() {
   for (const m of state.messages.slice(-18)) {
     const item=block(node('div',m.role==='user'?'You':'Forma','meta'),node('p',m.text,'chat'));
     if (m.report) item.append(rankingTable(m));
+    if (m.rows) item.append(evidenceRows(m));
     if (m.proposal && !state.dismissed.has(m.proposal.id)) item.append(button('Review proposal',()=>{
       state.filter='All';setTab('Recommendations');}));
     if (m.role==='user') item.classList.add('mine');main.append(item);
@@ -596,6 +614,90 @@ function chatView() {
     }
   }
 }
+function evidenceRows(message) {
+  const rows=message.rows, page=message.rowPage??0, size=10;
+  const section=node('section',undefined,'details');
+  section.append(node('h4','Source records · '+rows.length));
+  for (const row of rows.slice(page*size,(page+1)*size)) {
+    const label=message.sheet+'!'+row.groupCell+' · '+row.label+' / '+message.sheet+'!'+row.measureCell+' = '+row.value;
+    section.append(node('p',label+(row.identifier===null?'':' · '+row.identifierCell+' '+row.identifier)));
+    if (row.displayed!==null && row.displayed!==String(row.value))
+      section.append(node('p','Displayed in Excel: '+row.displayed,'muted'));
+    section.append(
+      button('Select '+row.measureCell,()=>run(async()=>{
+        const previous=await selectionAnchor();
+        await selectEvidenceRange(message.sheetId,row.measureCell);
+        state.evidenceBack=previous;
+        return 'Selected '+message.sheet+'!'+row.measureCell+'.';
+      },'Navigating to source…')));
+  }
+  if (rows.length>size) {
+    const control=node('div',undefined,'actions');
+    for (const [label,dir] of [['Previous records',-1],['Next records',1]])
+      control.append(button(label,()=>{message.rowPage=page+dir;render();},
+        {enabled:dir<0?page>0:(page+1)*size<rows.length}));
+    section.append(control);
+  }
+  if (state.evidenceBack) section.append(button('Return to previous selection',()=>run(async()=>{
+    const previous=state.evidenceBack;
+    await selectEvidenceRange(previous.id,previous.address);
+    state.evidenceBack=null;
+  },'Restoring selection…')));
+  return section;
+}
+
+async function answerEvidence(question,kind,exactGroup) {
+  const prior=state.evidence;
+  if (!prior || prior.sessionId!==state.sessionId) throw Error('Calculate the category totals first so Forma can identify their source rows.');
+  const {source,fields}=prior;
+  const data=await captureDataset({sheetId:source.sheetId,address:source.address},false,true);
+  const current=aggregationEvidence(data,fields,{sessionId:state.sessionId,normalised:prior.grouping!=='exact label'});
+  if (!sameEvidence(prior,current)) {
+    state.evidence=null;
+    throw Error('The source cells changed since the previous calculation. Run the ranking again before using its totals or proposing edits.');
+  }
+  if (kind==='regroup') {
+    const report=rankedAnalysis({...fields,sessionId:state.sessionId,normalised:true,operation:'highest'},data);
+    state.evidence=report.evidence;state.evidenceGroup=report.groups[0].label;
+    state.messages.push({role:'assistant',text:report.text,report});
+    return;
+  }
+  const add=(text,rows,proposal)=>state.messages.push({role:'assistant',text,rows,proposal,sheet:source.sheet,sheetId:source.sheetId});
+  if (kind==='records') {
+    const group=exactGroup===undefined?evidenceGroup(prior,question,state.evidenceGroup):prior.groups.find(g=>g.label===exactGroup);
+    if (!group) throw Error('That category is no longer available in the saved result.');
+    state.evidenceGroup=group.label;
+    const sum=group.records.length<=12?group.records.map(x=>String(x.value)).join(' + ')+' = '+group.sum:
+      group.records.length+' numeric source values sum to '+group.sum;
+    add(group.label+' · '+sum+'. These records contribute to the aggregate.',group.records);
+    return;
+  }
+  const focus=typeof state.evidenceGroup==='string'?foldLabel(state.evidenceGroup):null;
+  const candidates=[...prior.variants].filter(([,labels])=>labels.size>1);
+  const match=candidates.find(([key])=>key===focus)|| (candidates.length===1?candidates[0]:null);
+  if (!match) throw Error('One category with a case or whitespace variant could not be identified. Ask for its exact total first.');
+  const [,labels]=match, rows=[...labels.values()].flat();
+  const folded=aggregationEvidence(data,fields,{sessionId:state.sessionId,normalised:true});
+  const combined=folded.groups.find(g=>g.label===match[0]);
+  if (kind==='variants') {
+    add('Exact grouping keeps '+[...labels.keys()].map(x=>JSON.stringify(x)).join(' and ')+
+      ' separate. If you opt into case-insensitive grouping with normalised whitespace, their combined total is '+combined.sum+'.',rows);
+    return;
+  }
+  const [canonical,...changes]=[...labels];
+  const variants=changes.flatMap(([,records])=>records);
+  if (variants.length!==1) throw Error('This proposal supports one affected cell. More than one variant cell was found; review the source records first.');
+  const record=variants[0];
+  const action={kind:'normalizeLabel',sheetId:source.sheetId,address:record.groupCell,before:record.label,value:canonical[0]};
+  const f={id:JSON.stringify(['normalise',source.sheetId,record.groupCell,record.label,canonical[0]]),
+    title:'Standardise category label',detail:'Review the case or whitespace change for this one record.',
+    sheet:source.sheet,address:record.groupCell,action,manual:true,category:'Data Quality',evidence:'Exact source records'};
+  await preview(action);
+  state.findings=[f,...state.findings.filter(x=>x.id!==f.id)];state.dismissed.delete(f.id);
+  add('Proposed '+source.sheet+'!'+record.groupCell+' · '+JSON.stringify(record.label)+' → '+JSON.stringify(canonical[0])+
+    '. Review and approve the change to apply it.',rows,f);
+}
+
 function rankingTable(message) {
   const report=message.report, pageSize=25;
   const pages=Math.ceil(report.groups.length/pageSize), page=message.page??0;
@@ -606,13 +708,23 @@ function rankingTable(message) {
   const body=node('tbody');
   for (const group of report.groups.slice(page*pageSize,(page+1)*pageSize)) {
     const row=node('tr');
-    for (const value of [group.rank,group.label,group.sum.toLocaleString(undefined,{maximumFractionDigits:10}),group.records])
-      row.append(node('td',value));
+    const category=node('td');
+    category.append(button(String(group.label),()=>run(async()=>{
+      const previous=state.evidence;
+      state.evidence=report.evidence;
+      try {await answerEvidence('', 'records',group.label);}
+      catch(error) {
+        if (state.evidence!==null) state.evidence=previous;
+        throw error;
+      }
+    },'Checking source records…')));
+    row.append(node('td',group.rank),category,node('td',group.sum.toLocaleString(undefined,{maximumFractionDigits:10})),
+      node('td',group.records));
     body.append(row);
   }
   table.append(body);
   const wrap=node('div',undefined,'ranking-wrap');
-  wrap.append(table);
+  wrap.append(table,node('p','Select a category to see its source records.','muted'));
   if (pages>1) {
     const controls=node('div',undefined,'actions');
     const change=delta=>{message.page=page+delta;render();};
@@ -622,13 +734,13 @@ function rankingTable(message) {
   }
   return wrap;
 }
-async function captureDataset(target,expand=false) {
+async function captureDataset(target,expand=false,evidence=false) {
   state.datasetController=new AbortController();
   render();
   try {
     return await readDataset(state.datasetController.signal,(read,total)=>{
       notice.textContent='Read '+read.toLocaleString()+' of '+total.toLocaleString()+' rows.';
-    },target,expand);
+    },target,expand,evidence);
   } finally {state.datasetController=null;}
 }
 function comparisonPanel() {
@@ -693,7 +805,7 @@ async function preparePivot(question) {
 
 async function submitQuestion(question,work) {
   state.chatError='';
-  const conversation=state.messages.filter(m=>!m.failed).slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
+  const conversation=state.messages.filter(m=>!m.failed&&!m.report&&!m.rows).slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
   const previous=state.messages.at(-1);
   const turn=previous?.failed && previous.text===question?previous:{role:'user',text:question};
   if (turn!==previous) state.messages.push(turn);
@@ -730,9 +842,11 @@ async function answerLocal(question,intent) {
       (snapshot?.partial?' This was a bounded sample.':'');
   } else if (['count','columns','rank'].includes(intent.kind)) {
     const sheet=intent.worksheet?await activeWorksheet():null;
-    const data=await captureDataset(sheet?{sheetId:sheet.id,used:true}:undefined,true);
-    if (intent.kind==='rank' && intent.detailed) {
-      report=rankedAnalysis(intent,data);
+    const data=await captureDataset(sheet?{sheetId:sheet.id,used:true}:undefined,true,intent.kind==='rank');
+    if (intent.kind==='rank') {
+      report=rankedAnalysis({...intent,sessionId:state.sessionId},data);
+      state.evidence=report.evidence;
+      state.evidenceGroup=intent.operation==='lowest'?report.groups.at(-1).label:report.groups[0].label;
       reply=report.text;
     } else reply=datasetAnswer(intent,data);
   } else if (total) {
@@ -826,9 +940,9 @@ async function ask(question,conversation) {
         selection:anchor?{...s,...anchor}:null,readRange:readContext,
         detailed:goal==='ranking'||needsCalculation&&/\b(?:rank|all|every|explain|source)\b/i.test(question),
         rankingOperation:goal==='ranking'&&/\blowest\b/i.test(question)?'lowest':undefined,
-        readDataset:target=>{
+        sessionId:state.sessionId,readDataset:(target,evidence)=>{
           if (!target&&!anchor) throw Error('Select the dataset, including its header.');
-          return captureDataset(target??{sheetId:anchor.id,address:anchor.address},true);
+          return captureDataset(target??{sheetId:anchor.id,address:anchor.address},true,evidence);
         }});
       } catch(error) {
         if (error.name==='AbortError') throw error;
@@ -836,6 +950,10 @@ async function ask(question,conversation) {
         throw Error(operation+' failed. '+error.message);
       }
       if (outcome.local) {
+        if (outcome.report) {
+          state.evidence=outcome.report.evidence;
+          state.evidenceGroup=outcome.report.groups[0].label;
+        }
         state.messages.push({role:'assistant',text:outcome.local,report:outcome.report});
         return '';
       }

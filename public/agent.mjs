@@ -1,3 +1,4 @@
+import {aggregationEvidence} from './evidence.mjs';
 import {a1, datasetColumns, formula, formulaReferences, profile, rect, summariseBy, DATASET_CELL_LIMIT} from './engine.mjs';
 
 const tools=new Set(['InspectWorkbook','InspectWorksheet','InspectRange','AnalyseColumn','AggregateData',
@@ -103,10 +104,10 @@ export async function executeTool(call,context) {
   const target=toolTarget(call,context.sheets,context.selection);
   switch (call.tool) {
     case 'AggregateData': case 'FindDuplicates': case 'AnalyseColumn': {
-      const dataset=await context.readDataset(target?.address?target:null);
+      const dataset=await context.readDataset(target?.address?target:null,context.detailed&&call.tool==='AggregateData');
       if (call.tool==='AggregateData' && context.detailed && call.measure && call.dimension &&
           ['total','highest','lowest'].includes(call.operation)) {
-        const report=rankedAnalysis({...call,operation:context.rankingOperation??call.operation},dataset);
+        const report=rankedAnalysis({...call,operation:context.rankingOperation??call.operation,sessionId:context.sessionId},dataset);
         return {local:report.text,report};
       }
       const local=call.tool==='AggregateData'?groupedReply(call,dataset):
@@ -180,7 +181,8 @@ function compoundRank(q) {
   const match=/\bwhich ([^.!?;]+?) (?:has|had|generates?|generated|produces?|earned) (?:the )?(highest|lowest) (?:total )?([^.!?;,]+?)(?=\s+(?:and|then)\s+(?:calculate|rank|list|show|explain|identify|provide)\b|[.!?;,]|$)/i.exec(q);
   if (!match) return null;
   return {kind:'rank',dimension:match[1].trim().replace(/^product category$/i,'Product Category'),
-    operation:match[2].toLowerCase(),measure:match[3].trim(),
+    operation:match[2].toLowerCase(),measure:match[3].replace(/\s+(?:with|using|when grouping|if grouped)\s+case.insensitiv(?:e|ely).*$/i,'').trim(),
+    normalised:/\b(?:case.insensitiv(?:e|ely)|ignore case|normalise whitespace|normalize whitespace)\b/i.test(q),
     detailed:/\b(?:every|all|rank|explain|source|cells|ranges|limitations)\b/i.test(q),
     worksheet:/\b(?:current|active|this) worksheet\b/i.test(q) && !/\b(?:selected|selection)\b/i.test(q)};
 }
@@ -188,7 +190,7 @@ function compoundRank(q) {
 export function localQuestion(question) {
   const q=question.trim().replace(/[.?!]+$/,'');
   const compound=compoundRank(q);
-  if (compound?.detailed || compound?.worksheet) return compound;
+  if (compound) return compound;
   if (/^(?:what(?: is|'s) (?:the )?(?:(?:current|active) )?(?:worksheet|sheet)(?: called| name)?|name (?:the )?(?:active|current) (?:worksheet|sheet))$/i.test(q)) return {kind:'sheet'};
   if (/^(?:(?:find|show|list|check for|report) (?:the |all |any )?formula errors(?: in (?:this|the current) (?:sheet|worksheet))?)$/i.test(q))
     return {kind:'errors'};
@@ -228,27 +230,32 @@ function resolveRankFields(intent,headers) {
 export function rankedAnalysis(intent,d) {
   const headers=datasetColumns(d.values);
   const fields=resolveRankFields(intent,headers);
-  const result=summariseBy(d,fields.measure,fields.dimension);
-  if (!result.groups.length) throw Error('No eligible numeric rows in '+source(d)+'. Check the sales and category cells.');
-  if (result.groups.reduce((n,g)=>n+g.records,0)!==result.count)
-    throw Error('The category totals could not be verified against the included record count.');
-  const selected=rect(d.address,DATASET_CELL_LIMIT);
-  const qualify=label=>d.sheet+'!'+a1(selected.r+1,selected.c+headers.indexOf(label),selected.rows-1,1);
-  const dimensionRange=qualify(result.dimension), measureRange=qualify(result.measure);
+  const evidence=aggregationEvidence(d,fields,intent);
+  if (!evidence.groups.length) throw Error('No eligible numeric rows in '+source(d)+'. Check the sales and category cells.');
+  const {counts,source:scope}=evidence;
+  const codes=new Set(evidence.observations.measureFormats.flatMap(format=>
+    format.match(/\b(?:AUD|USD|NZD|CAD|EUR|GBP|JPY|CHF|CNY|INR)\b/g)??[]));
+  if (codes.size>1) throw Error('The measure column shows more than one currency ('+[...codes].join(', ')+
+    '). Select a single-currency range or supply a separate converted measure before ranking.');
+  const excluded=Object.entries(evidence.reasons).map(([reason,count])=>reason+': '+count).join(', ');
+  const dimensionRange=scope.sheet+'!'+scope.groupRange,measureRange=scope.sheet+'!'+scope.measureRange;
   let rank=0;
-  const groups=result.groups.map(({label,sum,records},index)=>{
-    if (index===0 || sum!==result.groups[index-1].sum) rank=index+1;
-    return {label,sum,records,rank};
+  const groups=evidence.groups.map(({label,sum,records},index)=>{
+    if (index===0 || sum!==evidence.groups[index-1].sum) rank=index+1;
+    return {label,sum,records:records.length,rank};
   });
   const best=intent.operation==='lowest'?groups.at(-1).sum:groups[0].sum;
   const winners=groups.filter(g=>g.sum===best);
   const money=n=>n.toLocaleString(undefined,{maximumFractionDigits:10});
-  const title=(intent.operation==='lowest'?'Lowest':'Highest')+' total '+result.measure;
+  const title=(intent.operation==='lowest'?'Lowest':'Highest')+' total '+fields.measure;
   const top=winners.slice(0,8).map(g=>g.label).join(', ');
   const text=title+': '+top+' · '+money(best)+(winners.length>1?' ('+winners.length+' tied categories)':'')+'.\n\n'+
     'I summed numeric values in '+measureRange+' for each matching value in '+dimensionRange+
-    '. Ranked by total, highest first. '+result.count+' rows included, '+result.omitted+
-    ' rows omitted because a group or measure was missing, invalid, or an Excel error. Empty rows are excluded. '+
-    'Category labels are grouped exactly as entered. Repeated records are counted separately. Scope: '+source(d)+'.';
-  return {text,groups,measure:result.measure,dimension:result.dimension};
+    '. Ranked by total, highest first. '+counts.included+' rows included, '+counts.excluded+
+    ' rows omitted'+(excluded?' ('+excluded+')':'')+'. Empty rows are excluded. '+
+    (intent.normalised?'Text labels are grouped case-insensitively with trimmed, collapsed whitespace. ':
+      'Category labels are grouped exactly as entered. ')+
+    'Repeated records are counted separately'+(counts.repeatedIdRows?' ('+counts.repeatedIdRows+' repeated identifier occurrence(s))':'')+
+    '. The full requested range includes hidden and filtered rows. Scope: '+source(d)+'.';
+  return {text,groups,...fields,evidence};
 }
