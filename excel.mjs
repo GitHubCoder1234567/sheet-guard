@@ -1,4 +1,4 @@
-import {a1, rect, validate, chartData, chartTypes, palettes, correction, formula, LIMIT} from './engine.mjs';
+import {a1, rect, validate, chartData, chartTypes, headingStyle, correction, formula, trimText, additiveMeasure, LIMIT} from './engine.mjs';
 
 const properties = 'rowIndex,columnIndex,rowCount,columnCount,values,formulas,formulasR1C1,numberFormat,valueTypes,text';
 export const supported = version => Office.context.requirements.isSetSupported('ExcelApi',version);
@@ -13,21 +13,25 @@ const content = s => [s.formulas.map((row,r) => row.map((value,c) =>
   typeof value === 'string' && value.startsWith('=') && value !== s.values[r][c] ? value : s.values[r][c]))];
 const checkCancel = signal => { if (signal?.aborted) throw new DOMException('Scan cancelled.', 'AbortError'); };
 
-export async function scan(signal,onProgress) {
+export async function scan(signal,onProgress,sheetIds) {
   const sheets = await Excel.run(async ctx => {
     const collection = ctx.workbook.worksheets;
     collection.load('items/id,items/name,items/visibility');
     await ctx.sync();
-    return collection.items.filter(s => s.visibility === 'Visible').map(s => s.id);
+    return collection.items.map(s=>({id:s.id,name:s.name,visibility:s.visibility}));
   });
+  const visible=sheets.filter(s=>s.visibility==='Visible').slice(0,12);
+  const targets=sheetIds?visible.filter(s=>sheetIds.has(s.id)):visible;
   const snapshots = [];
-  for (const id of sheets.slice(0,12)) {
+  for (const {id} of targets) {
     checkCancel(signal);
     const snapshot = await Excel.run(async ctx => {
       const sheet = ctx.workbook.worksheets.getItem(id);
       sheet.load('id,name');
       const used = sheet.getUsedRangeOrNullObject(true);
       used.load('rowIndex,columnIndex,rowCount,columnCount');
+      const names=sheet.names, tables=sheet.tables;
+      names?.load('items/name');tables?.load('items/name');
       const charts = sheet.charts;
       charts.load('items/name');
       await ctx.sync();
@@ -37,13 +41,32 @@ export async function scan(signal,onProgress) {
       const range = sheet.getRange(a1(used.rowIndex,used.columnIndex,rows,columns));
       range.load(properties);
       await ctx.sync();
-      return read(range,sheet,{chartCount:charts.items.length, partial:rows !== used.rowCount || columns !== used.columnCount});
+      return read(range,sheet,{chartCount:charts.items.length,names:names?.items.map(x=>x.name).slice(0,12)??[],
+        tables:tables?.items.map(x=>x.name).slice(0,12)??[],partial:rows !== used.rowCount || columns !== used.columnCount});
     });
     if (snapshot) snapshots.push(snapshot);
-    onProgress?.(snapshots.length,sheets.length);
+    onProgress?.(snapshots.length,targets.length);
   }
   checkCancel(signal);
-  return {snapshots, omitted:Math.max(0,sheets.length-12)};
+  return {snapshots, sheets, omitted:Math.max(0,sheets.filter(s=>s.visibility==='Visible').length-12)};
+}
+
+export async function watchSheets(onChange) {
+  if (!supported('1.7')) throw Error('Workbook monitoring requires ExcelApi 1.7.');
+  return Excel.run(async ctx=>{
+    const list=ctx.workbook.worksheets;
+    list.load('items/id,items/visibility');
+    await ctx.sync();
+    const registrations=list.items.filter(s=>s.visibility==='Visible').slice(0,12).map(s=>{
+      const id=s.id;
+      return s.onChanged.add(event=>onChange(id,event.address));
+    });
+    await ctx.sync();
+    return async () => Excel.run(ctx,async current=>{
+      registrations.forEach(registration=>registration.remove());
+      await current.sync();
+    });
+  });
 }
 
 export async function selection() {
@@ -71,6 +94,24 @@ async function loadSource(ctx,action) {
   return {sheet,range,snapshot:read(range,sheet)};
 }
 
+export async function inspectRange(sheetId,address) {
+  rect(address);
+  return Excel.run(async ctx => {
+    const {sheet,range,snapshot}=await loadSource(ctx,{sheetId,address});
+    // Excel's native selection is a view change and leaves cell formatting alone.
+    if (typeof sheet.activate !== 'function' || typeof range.select !== 'function')
+      return {snapshot,selected:false};
+    try {
+      sheet.activate();
+      range.select();
+      await ctx.sync();
+      return {snapshot,selected:true};
+    } catch {
+      return {snapshot,selected:false};
+    }
+  });
+}
+
 function chartPosition(action) {
   if (action.position) return action.position;
   const {r,c,columns} = rect(action.address);
@@ -88,6 +129,14 @@ async function chartSlot(ctx,sheet,address) {
   const overlap = sheet.charts.items.some(c => c.left < range.left+range.width && c.left+c.width > range.left &&
     c.top < range.top+range.height && c.top+c.height > range.top);
   if (overlap) throw Error('The chart position overlaps an existing chart.');
+}
+
+function checkPriorFormula(snapshot,action) {
+  const prior = snapshot.values[0][0];
+  if (snapshot.types[0][0] === 'Error' ||
+      (formula(snapshot,0,0) ? !correction(snapshot.r1c1[0][0],rect(action.address).c) :
+        prior !== '' && prior !== null && typeof prior !== 'number'))
+    throw Error('Only blank, numeric, and simple arithmetic cells can be safely restored by the formula editor.');
 }
 
 async function formulaContext(ctx,sheet,action) {
@@ -110,17 +159,31 @@ async function formulaContext(ctx,sheet,action) {
   if (!correction(action.value,c) || ![0,1,3,4].every(i=>
     formula(snapshot,i,0) && snapshot.r1c1[i][0]===action.value))
     throw Error('The surrounding formula pattern no longer supports this repair.');
-  return [sourceState(snapshot),inputs.map(cell=>cell.values[0][0])];
+  return {band:snapshot,inputs:inputs.map(cell=>cell.values[0][0])};
 }
 
 export async function preview(action) {
   validate(action);
   return Excel.run(async ctx => {
-    const {snapshot,sheet} = await loadSource(ctx,action);
+    const {snapshot,sheet,range} = await loadSource(ctx,action);
     const visual = ['chart','dashboard'].includes(action.kind);
     if (visual && !supported('1.10')) throw Error('Charts require ExcelApi 1.10.');
-    let destination, position, formulaEvidence;
+    let destination, position, formulaEvidence, currentStyle;
+    if (['style','number','trim'].includes(action.kind)) await writable(ctx,sheet,range,true);
+    if (action.kind==='trim') await checkTrim(ctx,range,snapshot);
+    if (action.kind==='style') {
+      loadStyle(range);
+      await ctx.sync();
+      currentStyle=styleState(range);
+    }
+    if (['negative','heatmap','dataBar'].includes(action.kind)) {
+      await writable(ctx,sheet,range,false);
+      await assertVisible(ctx,range);
+      if (!snapshot.values.every(([v])=>typeof v==='number' && Number.isFinite(v)))
+        throw Error('Select numeric values only.');
+    }
     if (action.kind === 'formula') {
+      checkPriorFormula(snapshot,action);
       await writable(ctx,sheet,sheet.getRange(action.address),true);
       formulaEvidence = await formulaContext(ctx,sheet,action);
     }
@@ -134,9 +197,19 @@ export async function preview(action) {
       await chartSlot(ctx,target,position);
     }
     const data = visual ? chartData(snapshot, action.type) : null;
-    if (action.kind === 'dashboard' && !/^(?:total )?(?:sales|revenue|units|quantity|orders)(?: \([A-Z]{3}\))?$/i.test(data.y))
-      throw Error('Dashboard totals require an explicitly additive heading.');
-    return {action:structuredClone(action), snapshot, data, destination, position, formulaEvidence};
+    if (visual) await assertVisible(ctx,range);
+    if (action.kind==='chart') {
+      const target=action.destination?ctx.workbook.worksheets.getItem(action.destination):sheet;
+      await writable(ctx,target,null,false);
+    }
+    if (action.kind === 'dashboard') {
+      if (!additiveMeasure(data.y,action)) throw Error('Dashboard totals require an additive metric.');
+      const protection=ctx.workbook.protection;
+      protection.load('protected');
+      await ctx.sync();
+      if (protection.protected) throw Error('Workbook structure is protected.');
+    }
+    return {action:structuredClone(action), snapshot, data, destination, position, formulaEvidence,currentStyle};
   });
 }
 
@@ -161,6 +234,17 @@ async function assertVisible(ctx,range) {
   range.load('rowHidden,columnHidden');
   await ctx.sync();
   if (range.rowHidden !== false || range.columnHidden !== false) throw Error('Chart sources must be visible and unfiltered.');
+}
+
+async function checkTrim(ctx,range,snapshot) {
+  const tables=range.getTables(false);
+  tables.load('items/name');
+  await ctx.sync();
+  const before=snapshot.values[0][0];
+  const after=trimText(before);
+  if (tables.items.length || snapshot.types[0][0]!=='String' || formula(snapshot,0,0) || after===null)
+    throw Error('Choose eligible literal text outside an Excel table.');
+  return after;
 }
 
 function styleState(range) {
@@ -275,7 +359,7 @@ export async function apply(p) {
       const data = chartData(snapshot,action.type);
       await assertVisible(ctx,range);
       if (action.kind === 'dashboard') {
-          if (!/^(?:total )?(?:sales|revenue|units|quantity|orders)(?: \([A-Z]{3}\))?$/i.test(data.y))
+          if (!additiveMeasure(data.y,action))
           throw Error('Dashboard totals require an explicitly additive heading.');
         return {description:await dashboard(ctx,range,action,data,snapshot.name)};
       }
@@ -318,18 +402,20 @@ export async function apply(p) {
     await writable(ctx,sheet,range,true);
     if (action.kind==='formula' && !equal(await formulaContext(ctx,sheet,action),p.formulaEvidence))
       throw Error('The formula context changed. Preview again.');
-    let nextStyle;
+    let nextStyle, trimmed;
     if (action.kind === 'style') {
-      nextStyle = [true,'#FFFFFF',(action.color || palettes[action.value]).toUpperCase()];
+      loadStyle(range);
+      await ctx.sync();
+      if (!equal(styleState(range),p.currentStyle)) throw Error('The source style changed. Preview the change again.');
+      nextStyle = headingStyle(action);
       setStyle(range,nextStyle);
+    } else if (action.kind==='trim') {
+      trimmed=await checkTrim(ctx,range,snapshot);
+      range.values=[[trimmed]];
     } else if (action.kind === 'number') {
       range.numberFormat = snapshot.values.map(row=>row.map(()=>action.value));
     } else {
-      const prior = snapshot.values[0][0];
-      if (snapshot.types[0][0] === 'Error' ||
-          (formula(snapshot,0,0) ? !correction(snapshot.r1c1[0][0],rect(action.address).c) :
-            prior !== '' && prior !== null && typeof prior !== 'number'))
-        throw Error('Only blank, numeric, and simple arithmetic cells can be safely restored by the formula editor.');
+      checkPriorFormula(snapshot,action);
       range.formulasR1C1 = [[action.value]];
     }
     range.load(properties);
@@ -337,6 +423,8 @@ export async function apply(p) {
     await ctx.sync();
     const after = read(range,sheet);
     const verified = action.kind === 'formula' ? after.r1c1[0][0] === action.value && after.types[0][0] !== 'Error'
+      : action.kind==='trim'?after.values[0][0]===trimmed && after.types[0][0]==='String' &&
+        !formula(after,0,0) && equal(after.formats,snapshot.formats)
       : equal(content(snapshot),content(after)) && (action.kind === 'number'
         ? after.formats.every(row=>row.every(value=>value===action.value))
         : equal(styleState(range).map(v=>typeof v==='string'?v.toUpperCase():v),nextStyle));
@@ -362,6 +450,14 @@ export async function rollback(recovery) {
     await writable(ctx,sheet,range,true);
     if (!equal(sourceState(snapshot),sourceState(after))) throw Error('The range changed after applying the operation. Undo was skipped.');
     if (action.kind === 'number') range.numberFormat = before.formats;
+    else if (action.kind==='trim') {
+      const tables=range.getTables(false);
+      tables.load('items/name');
+      await ctx.sync();
+      if (tables.items.length || trimText(before.values[0][0])!==snapshot.values[0][0])
+        throw Error('This text cell cannot be safely restored.');
+      range.values=before.values;
+    }
     else if (action.kind === 'formula') {
       await formulaContext(ctx,sheet,action);
       range.formulasR1C1 = before.r1c1;

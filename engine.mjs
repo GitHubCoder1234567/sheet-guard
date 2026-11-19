@@ -6,6 +6,7 @@ export const chartTypes = {
 export const palettes = {
   Professional: '#14664a', Financial: '#203b57', Corporate: '#343575',
   Minimal: '#454c49', Modern: '#00746d', Custom: '#385c81',
+  Finance:'#203b57', 'Executive Report':'#284354', 'Data Analysis':'#245666',
 };
 export const categories = ['Errors', 'Data Quality', 'Formatting', 'Visualisations', 'Analysis', 'Automation'];
 export const col = i => {
@@ -29,6 +30,8 @@ export function rect(address) {
 }
 const blank = v => v === '' || v === null;
 const numeric = v => typeof v === 'number' && Number.isFinite(v);
+export const trimText = v => typeof v==='string' && /[A-Za-z]/.test(v.trim()) &&
+  /^[A-Za-z]/.test(v.trim()) && v.trim()!==v ? v.trim() : null;
 const text = v => typeof v === 'string' && !!v.trim();
 export const formula = (s, r, c) => typeof s.formulas[r][c] === 'string' &&
   s.formulas[r][c].startsWith('=') && s.values[r][c] !== s.formulas[r][c];
@@ -94,6 +97,73 @@ function localCycles(s) {
   }
   return [...found];
 }
+// This lexer reports A1 references for inspection. It does not rewrite formulas.
+export function formulaReferences(expression) {
+  const opaque=/"(?:[^"]|"")*"|\[(?:[^\[\]]|\[[^\]]*\])*\]/g;
+  const masked=expression.replace(opaque,m=>' '.repeat(m.length));
+  const refs=/(?<![.\w])(?:(?:'((?:[^']|'')+)'|([A-Za-z_][\w.]*))!)?(\$?[A-Z]{1,3}\$?[1-9]\d{0,6})(?::(\$?[A-Z]{1,3}\$?[1-9]\d{0,6}))?(?![.\w(])/gi;
+  return [...masked.matchAll(refs)].flatMap(m=>{
+    // An external book reference and a 3-D range are outside this parser.
+    if (/\]\s*$|:\s*$/.test(expression.slice(0,m.index))) return [];
+    const first=m[3].replaceAll('$','').toUpperCase(), last=m[4]?.replaceAll('$','').toUpperCase();
+    try {rect(first);if (last) rect(last);}
+    catch {return [];}
+    return [{sheet:m[1]?.replaceAll("''","'")??m[2],first,last,absolute:m[3].includes('$') || !!m[4]?.includes('$')}];
+  });
+}
+
+export function profile(s) {
+  const columns=s.values[0]?.map((label,c)=>{
+    const counts={numbers:0,text:0,blank:0,formulas:0,errors:0};
+    for (let r=1;r<s.values.length;r++) {
+      const v=s.values[r][c];
+      if (s.types[r][c]==='Error') counts.errors++;
+      else if (blank(v)) counts.blank++;
+      else if (numeric(v)) counts.numbers++;
+      else if (text(v)) counts.text++;
+      if (formula(s,r,c)) counts.formulas++;
+    }
+    const format=s.formats.slice(1).map(row=>row[c]).find(v=>v&&v!=='General')||'';
+    const type=/\bid\b|identifier|reference number/i.test(String(label))?'Identifier':
+      /\bdate\b|^month$|^year$/i.test(String(label))?'Date or period':
+      format.includes('%')?'Percentage':/AUD|USD|EUR|GBP|[$€£]/.test(format)?'Monetary':
+      counts.numbers>counts.text?'Numeric':counts.text?'Text':'Other';
+    return {label:String(label||col(s.column+c)),type,...counts};
+  })??[];
+  const purpose=/(sales|revenue|orders)/i.test(columns.map(c=>c.label).join(' '))?'Possible sales reporting':
+    /(inventory|stock|sku)/i.test(columns.map(c=>c.label).join(' '))?'Possible inventory tracking':
+    /(budget|actual|variance)/i.test(columns.map(c=>c.label).join(' '))?'Possible budget reporting':null;
+  return {columns,purpose};
+}
+
+function dependencyEvidence(s,sheets) {
+  const dependencies=new Map(), broken=[];
+  const lookup=new Map(sheets.map(sheet=>[sheet.name.toLowerCase(),sheet]));
+  for (let r=0;r<s.values.length;r++) for (let c=0;c<s.values[r].length;c++) {
+    if (!formula(s,r,c)) continue;
+    const expression=s.formulas[r][c];
+    const address=a1(s.row+r,s.column+c);
+    if (/#REF!/i.test(expression.replace(/"(?:[^"]|"")*"/g,''))) broken.push(address);
+    for (const reference of formulaReferences(expression.slice(0,4096)).slice(0,64)) {
+      if (!reference.sheet || reference.sheet.toLowerCase()===s.name.toLowerCase()) continue;
+      const key=reference.sheet.toLowerCase();
+      if (!dependencies.has(key)) dependencies.set(key,{name:reference.sheet,count:0,example:address,error:0});
+      const item=dependencies.get(key);
+      item.count++;
+      const other=lookup.get(key);
+      if (other && !reference.last) {
+        const {r:row,c:column}=rect(reference.first);
+        if (other.types[row-other.row]?.[column-other.column]==='Error') item.error++;
+      }
+    }
+  }
+  return {dependencies:[...dependencies.values()],broken};
+}
+
+export const additiveMeasure = (label,action={}) =>
+  /^(?:total )?(?:sales|revenue|units|quantity|orders)(?: \([A-Z]{3}\))?$/i.test(label) ||
+  action.confirmedMetric === label;
+
 export function audit(sheets) {
   const findings = [];
   for (const s of sheets) {
@@ -103,7 +173,7 @@ export function audit(sheets) {
         id: JSON.stringify([s.id, category, title, address])});
     const rows = s.values.length, widths = s.values[0].length;
     const addr = (r,c,rr=1,cc=1) => a1(s.row+r,s.column+c,rr,cc);
-    const errors = [], spaces = [], duplicate = [], seen = new Set();
+    const errors = [], spaces = [], trimCandidates=[], duplicate = [], seen = new Set();
     for (let r = 0; r < rows; r++) {
       const row = s.values[r];
       if (r && row.some(v => !blank(v))) {
@@ -113,20 +183,37 @@ export function audit(sheets) {
       }
       row.forEach((v,c) => {
         if (s.types[r][c] === 'Error') errors.push(addr(r,c) + ' ' + v);
-        if (text(v) && v.trim() !== v && !formula(s,r,c)) spaces.push(addr(r,c));
+        if (text(v) && v.trim() !== v && !formula(s,r,c)) {
+          spaces.push(addr(r,c));
+          if (s.types[r][c]==='String' && trimText(v)!==null) trimCandidates.push(addr(r,c));
+        }
       });
     }
     const grouped = (category, priority, title, cells, detail) => {
-      if (cells.length) add(category, priority, title, detail + ' ' + cells.slice(0, 8).join(', ') +
+      if (!cells.length) return;
+      add(category, priority, title, detail + ' ' + cells.slice(0, 8).join(', ') +
         (cells.length > 8 ? ' … (' + cells.length + ' total)' : ''), addr(0,0,rows,widths));
+      findings.at(-1).focusAddress=cells[0].split(' ')[0];
     };
+    const {dependencies,broken}=dependencyEvidence(s,sheets);
+    grouped('Errors', 97, 'Broken formula references', broken, 'These formula expressions contain #REF!. Excel lost a referenced cell or range.');
+    for (const dependency of dependencies.slice(0,6)) add(
+      dependency.error?'Errors':'Analysis',dependency.error?86:29,
+      dependency.error?'Referenced sheet contains errors · '+dependency.name:'Cross-sheet dependency · '+dependency.name,
+      dependency.count+' direct reference(s) link here. '+(dependency.error?
+        dependency.error+' referenced cell(s) returned an error in the sampled data.':'Changes to that sheet may affect these calculations.'),
+      dependency.example,undefined,'Parsed A1 references');
     grouped('Errors', 99, 'Circular formula references', localCycles(s), 'Local arithmetic references form a cycle.');
     grouped('Errors', 100, 'Excel error values', errors, 'Inspect these calculation errors.');
     grouped('Data Quality', 90, 'Duplicate records', duplicate, 'Confirm which records to retain.');
     grouped('Data Quality', 63, 'Leading or trailing whitespace', spaces, 'Review these text cells before standardising them.');
+    for (const address of trimCandidates.slice(0,3))
+      add('Data Quality',61,'Trim text whitespace','Remove leading and trailing spaces from this text cell.',address,
+        {kind:'trim',sheetId:s.id,address},'Literal text');
     for (let c = 0; c < widths; c++) {
       const invalidDates = [], formats = new Map(), numbersAsText = [], missing = [], categoryVariants = new Map(), sample = [];
       const label = String(s.values[0][c] || col(s.column+c));
+      const patterns=new Map();
       for (let r = 1; r < rows; r++) {
         const v = s.values[r][c];
         if (/\bdate\b/i.test(label) && invalidDate(v)) invalidDates.push(addr(r,c));
@@ -142,6 +229,11 @@ export function audit(sheets) {
           if (!categoryVariants.has(key)) categoryVariants.set(key, new Set());
           categoryVariants.get(key).add(v);
         }
+        if (formula(s,r,c) && typeof s.r1c1[r][c]==='string') {
+          const pattern=s.r1c1[r][c];
+          if (!patterns.has(pattern)) patterns.set(pattern,[]);
+          patterns.get(pattern).push(r);
+        }
         if (r < 3 || r+2 >= rows) continue;
         const neighbours = [-2,-1,1,2].map(d => s.r1c1[r+d][c]);
         const expected = neighbours[0];
@@ -151,6 +243,21 @@ export function audit(sheets) {
         add('Errors', 80, formula(s,r,c) ? 'Formula differs from nearby rows' : 'Calculated column has an exception',
           'Four adjacent rows use ' + expected + '. Review this exception before applying the pattern.',
           address, {kind:'formula', sheetId:s.id, address, value:expected}, 'Adjacent formula pattern');
+      }
+      if (patterns.size>1) {
+        const ordered=[...patterns].sort((a,b)=>b[1].length-a[1].length);
+        const [dominant,matches]=ordered[0], formulaCount=ordered.reduce((n,[,items])=>n+items.length,0);
+        if (matches.length>=5 && matches.length/formulaCount>=0.75) {
+          for (const [pattern,exceptions] of ordered.slice(1)) {
+            if (exceptions.length!==1 || correction(dominant,s.column+c) || correction(pattern,s.column+c)) continue;
+            const r=exceptions[0];
+            if (r<=matches[0] || r>=matches.at(-1)) continue;
+            add('Errors',71,'Formula pattern exception · '+label,
+              matches.length+' sampled formulas share the pattern '+dominant.slice(0,180)+
+              '. This cell uses '+pattern.slice(0,180)+'. Confirm whether it represents a deliberate exception.',
+              addr(r,c),undefined,'Dominant column pattern');
+          }
+        }
       }
       if (formats.size > 1) {
         const address=addr(1,c,rows-1);
@@ -185,9 +292,14 @@ export function audit(sheets) {
       add('Visualisations', 40, type === 'line' ? 'Show the trend over time' : type === 'bar' ? 'Compare categories' : 'Compare numeric variables',
         data.y + ' by ' + data.x, address, {kind:'chart', sheetId:s.id, address, type,
           title:data.y + ' by ' + data.x, legend:false, xLabel:data.x, yLabel:data.y}, 'Complete two-column dataset');
-      if (type !== 'scatter' && /^(?:total )?(?:sales|revenue|units|quantity|orders)(?: \([A-Z]{3}\))?$/i.test(data.y))
+      if (type !== 'scatter' && additiveMeasure(data.y))
         add('Analysis', 35, 'Summarise ' + data.y, 'Create a separate worksheet with a linked total, observation count and chart.',
           address, {kind:'dashboard', sheetId:s.id, address, type, title:data.y + ' overview', legend:false}, 'Additive measure inferred from heading');
+      else if (type!=='scatter' && !/rate|ratio|percent|margin|average|%/i.test(data.y)) {
+        add('Analysis',31,'Confirm how to summarise '+data.y,
+          'A dashboard total depends on whether this metric can be added across rows.',address,undefined,'Business definition required');
+        findings.at(-1).clarification={metric:data.y,type,title:data.y+' overview'};
+      }
     }
   }
   return findings.sort((a,b) => b.priority-a.priority);
@@ -197,6 +309,8 @@ export function validate(action) {
   const bounds = rect(action.address);
   if (action.kind === 'formula') {
     if (bounds.rows !== 1 || bounds.columns !== 1 || !correction(action.value,bounds.c)) throw Error('Only bounded single-cell arithmetic repairs are supported.');
+  } else if (action.kind === 'trim') {
+    if (bounds.rows!==1 || bounds.columns!==1) throw Error('Text cleanup is limited to one cell.');
   } else if (action.kind === 'number') {
     if (!['0.0%', '#,##0.00', 'yyyy-mm-dd', '0'].includes(action.value)) throw Error('Unsupported number format.');
   } else if (action.kind === 'style') {
@@ -208,6 +322,10 @@ export function validate(action) {
     if (bounds.columns !== 2 || bounds.rows < 4 || bounds.rows > 81 || !Object.hasOwn(chartTypes,action.type) ||
         typeof action.title !== 'string' || !action.title.trim() || action.title.length > 120 ||
         /^\s*[=+\-@]/.test(action.title) || typeof action.legend !== 'boolean') throw Error('Invalid chart configuration.');
+    if (action.confirmedMetric !== undefined &&
+        (action.kind !== 'dashboard' || typeof action.confirmedMetric !== 'string' ||
+         !action.confirmedMetric.trim() || action.confirmedMetric.length > 120))
+      throw Error('Invalid confirmed dashboard metric.');
     for (const label of [action.xLabel,action.yLabel]) {
       if (label !== undefined && (typeof label !== 'string' || label.length > 120)) throw Error('Invalid axis label.');
     }
@@ -224,4 +342,50 @@ export function conflict(a,b) {
   if (a.sheetId !== b.sheetId) return false;
   const p = rect(a.address), q = rect(b.address);
   return p.r < q.r+q.rows && q.r < p.r+p.rows && p.c < q.c+q.columns && q.c < p.c+p.columns;
+}
+
+export function formulaPreview(plan) {
+  const {action,snapshot,formulaEvidence}=plan;
+  const match=/^=RC\[(-?\d+)\]([+*\/-])RC\[(-?\d+)\]$/.exec(action.value);
+  if (!match || !formulaEvidence) return null;
+  const [,left,operator,right]=match;
+  const [x,y]=formulaEvidence.inputs;
+  const result={'+':()=>x+y,'-':()=>x-y,'*':()=>x*y,'/':()=>x/y}[operator]();
+  const band=formulaEvidence.band;
+  return {
+    before:snapshot.formulas[0][0],
+    after:'='+a1(snapshot.row,snapshot.column+Number(left))+operator+a1(snapshot.row,snapshot.column+Number(right)),
+    current:snapshot.display[0][0],
+    estimate:Number.isFinite(result) && !(operator==='/' && y===0)?result:null,
+    neighbours:band.formulas.flatMap(([cell],i)=>i===2?[]:[[a1(band.row+i,band.column),cell]]),
+  };
+}
+
+export function formatted(value,format,fallback) {
+  if (typeof value!=='number') return fallback;
+  if (format==='yyyy-mm-dd') return null;
+  const settings={
+    '0.0%':{style:'percent',minimumFractionDigits:1,maximumFractionDigits:1},
+    '#,##0.00':{minimumFractionDigits:2,maximumFractionDigits:2},
+    '0':{maximumFractionDigits:0,useGrouping:false},
+  }[format];
+  return settings?new Intl.NumberFormat(undefined,settings).format(value):fallback;
+}
+
+export function previewRows(plan) {
+  const {snapshot:s,action:a}=plan;
+  const sample=s.values.slice(0,5).flatMap((row,r)=>row.slice(0,4).map((value,c)=>({
+    address:a1(s.row+r,s.column+c),value,before:s.display[r][c],format:s.formats[r][c],
+    after:a.kind==='number'?formatted(value,a.value,s.display[r][c]):a.kind==='trim'?trimText(value):s.display[r][c],
+  })));
+  return sample;
+}
+export function headingStyle(action) {
+  const fill=(action.color || palettes[action.value]).toUpperCase();
+  const rgb=fill.slice(1).match(/../g).map(hex=>{
+    const value=parseInt(hex,16)/255;
+    return value<=0.04045?value/12.92:((value+0.055)/1.055)**2.4;
+  });
+  const luminance=rgb[0]*0.2126+rgb[1]*0.7152+rgb[2]*0.0722;
+  return [true,luminance>0.179?'#000000':'#FFFFFF',fill];
 }
