@@ -548,12 +548,15 @@ export async function rollback(recovery) {
 // Long selections are loaded in bounded blocks. No cells are changed.
 export async function readDataset(signal,onProgress,target,expand=false) {
   return Excel.run(async ctx=>{
-    if (target) rect(target.address,DATASET_CELL_LIMIT);
-    let range=target?ctx.workbook.worksheets.getItem(target.sheetId).getRange(target.address):ctx.workbook.getSelectedRange();
-    const sheet=range.worksheet;
+    if (target?.address) rect(target.address,DATASET_CELL_LIMIT);
+    const worksheet=target?ctx.workbook.worksheets.getItem(target.sheetId):null;
+    let range=target?.used?worksheet.getUsedRangeOrNullObject(true):
+      worksheet?worksheet.getRange(target.address):ctx.workbook.getSelectedRange();
+    const sheet=worksheet??range.worksheet;
     const dimensions='rowIndex,columnIndex,rowCount,columnCount';
     range.load(dimensions);sheet.load('id,name,visibility');
     await ctx.sync();
+    if (range.isNullObject) throw Error('This worksheet has no populated data range.');
     if (expand && range.rowCount===1 && range.columnCount===1 && supported('1.7') &&
         typeof range.getSurroundingRegion==='function') {
       range=range.getSurroundingRegion();range.load(dimensions);await ctx.sync();

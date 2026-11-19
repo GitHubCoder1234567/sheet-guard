@@ -292,3 +292,54 @@ test('tool evidence returns an answer, and a later AI recommendation still requi
   await card.getByRole('button',{name:'Apply changes',exact:true}).waitFor();
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
 });
+
+test('exact multi-part sales question gives a ranked table and source cells instead of opening audit',async t=>{
+  let requests=0;
+  const mock=workbookDouble.replace("['Month','Revenue'],['January',12],['February',18],['March',22],['April',26]",
+    "['Category','Sales'],['Office',12],['Travel',18],['Office',22],['Meals',26]");
+  const {page}=await fixture(t,mock,()=>{requests++;return {status:500};});
+  await page.getByRole('textbox',{name:'Workbook question'}).fill('Analyse the current worksheet and identify which product category generates the highest total sales. Calculate the total sales for every category, rank them, explain the calculations, and identify the source cells.');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByText('Highest total Sales: Office · 34',{exact:false}).waitFor();
+  await page.getByText('Monthly!B2:B5 for each matching value in Monthly!A2:A5',{exact:false}).waitFor();
+  assert.deepEqual(await page.locator('.ranking-table tbody tr').allTextContents(),['1Office342','2Meals261','3Travel181']);
+  assert.equal(await page.getByRole('heading',{name:'Workbook review'}).count(),0);
+  assert.equal(requests,0);
+});
+
+test('cloud calculation can inspect and then aggregate; audit plan cannot replace its answer',async t=>{
+  const base={reply:'Checking workbook context.',intent:'none',option:'default',finding:-1,sheet:'',address:'',measure:'',dimension:'',operation:''};
+  let calls=0;
+  const {page}=await fixture(t,workbookDouble,payload=>{
+    calls++;
+    if (payload.toolResult) {
+      assert.equal(payload.toolResult.calculationPending,true);
+      return {...base,tool:'AggregateData',measure:'Revenue',dimension:'Month',operation:'total'};
+    }
+    return payload.question.includes('bad route')?{...base,tool:'none',intent:'audit'}:{...base,tool:'InspectRange'};
+  });
+  await openView(page,'Settings');
+  await page.getByRole('checkbox',{name:'Allow AI data sharing for this session'}).check();
+  await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+  const q=page.getByRole('textbox',{name:'Workbook question'}), send=page.getByRole('button',{name:'Send',exact:true});
+  await q.fill('Calculate grouped revenue from the selection and explain the source.');
+  await send.click();
+  await page.locator('.ranking-table tbody tr').first().waitFor();
+  assert.equal(calls,2);
+  await q.fill('Calculate grouped revenue from the selection, bad route');
+  await send.click();
+  await page.getByRole('alert').getByText('No calculation was performed.',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:'Workbook review'}).count(),0);
+});
+
+test('cleaning keeps the cleaning view, while unsupported statistics explain the limitation',async t=>{
+  const {page}=await fixture(t);
+  const q=page.getByRole('textbox',{name:'Workbook question'}), send=page.getByRole('button',{name:'Send',exact:true});
+  await q.fill('Clean this dataset');await send.click();
+  await page.getByRole('heading',{name:'Cleaning opportunities'}).waitFor();
+  await openView(page,'Settings');
+  await page.getByRole('checkbox',{name:'Allow AI data sharing for this session'}).check();
+  await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+  await q.fill('Calculate median revenue in this worksheet');await send.click();
+  await page.getByRole('alert').getByText('Forma cannot verify that statistic',{exact:false}).waitFor();
+});

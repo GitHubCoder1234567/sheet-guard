@@ -104,6 +104,11 @@ export async function executeTool(call,context) {
   switch (call.tool) {
     case 'AggregateData': case 'FindDuplicates': case 'AnalyseColumn': {
       const dataset=await context.readDataset(target?.address?target:null);
+      if (call.tool==='AggregateData' && context.detailed && call.measure && call.dimension &&
+          ['total','highest','lowest'].includes(call.operation)) {
+        const report=rankedAnalysis({...call,operation:context.rankingOperation??call.operation},dataset);
+        return {local:report.text,report};
+      }
       const local=call.tool==='AggregateData'?groupedReply(call,dataset):
         call.tool==='FindDuplicates'?duplicates(call,dataset):analyseColumn(call,dataset);
       return {local};
@@ -141,8 +146,49 @@ export async function executeTool(call,context) {
   }
 }
 
+// Resolve a concrete analytical objective before generic workbook actions.
+export function calculationRequired(question) {
+  return /\b(?:calculate|sum|rank|highest|lowest|average|median|how many|grand total|total sales|total revenue)\b/i.test(question) &&
+    /\b(?:worksheet|workbook|sales|revenue|expenses|amount|dataset|records|rows|transactions|column|category|categories|product|products|selection)\b/i.test(question) &&
+    !/^\s*(?:how (?:do|can|should) i|how many (?:rows|columns) (?:does|can) Excel|show me how to|write (?:an? )?(?:excel )?formula)\b/i.test(question);
+}
+
+export function calculationGoal(question) {
+  if (!calculationRequired(question)) return null;
+  if (/\b(?:median|standard deviation|percentile)\b/i.test(question)) return 'unsupported';
+  if (/\b(?:rank|highest|lowest)\b/i.test(question)) return 'ranking';
+  if (/\b(?:how many|count)\b/i.test(question)) return 'count';
+  if (/\b(?:average|mean)\b/i.test(question)) return 'average';
+  return 'total';
+}
+
+export function calculatesGoal(goal,plan) {
+  if (goal==='ranking') return plan.tool==='AggregateData' && !!plan.measure && !!plan.dimension &&
+    ['highest','lowest','total'].includes(plan.operation);
+  if (goal==='count') return plan.tool==='AggregateData' && plan.operation==='count';
+  if (goal==='average') return plan.tool==='AnalyseColumn' && !!plan.measure;
+  if (goal==='total') return plan.tool==='AggregateData' && plan.operation==='total' && !!plan.measure;
+  return false;
+}
+
+export function explicitAudit(question) {
+  return /^\s*(?:please\s+)?(?:audit|review|scan|check)(?:\s+(?:my|this|the|current|active))*\s+(?:workbook|worksheet|sheet|spreadsheet)[.!?]*\s*$/i.test(question) ||
+    /\b(?:find|detect|list|report|check for|audit for)\s+(?:(?:the|all|any|potential)\s+)*(?:formula errors|calculation errors|broken formulas)\b/i.test(question);
+}
+
+function compoundRank(q) {
+  const match=/\bwhich ([^.!?;]+?) (?:has|had|generates?|generated|produces?|earned) (?:the )?(highest|lowest) (?:total )?([^.!?;,]+?)(?=\s+(?:and|then)\s+(?:calculate|rank|list|show|explain|identify|provide)\b|[.!?;,]|$)/i.exec(q);
+  if (!match) return null;
+  return {kind:'rank',dimension:match[1].trim().replace(/^product category$/i,'Product Category'),
+    operation:match[2].toLowerCase(),measure:match[3].trim(),
+    detailed:/\b(?:every|all|rank|explain|source|cells|ranges|limitations)\b/i.test(q),
+    worksheet:/\b(?:current|active|this) worksheet\b/i.test(q) && !/\b(?:selected|selection)\b/i.test(q)};
+}
+
 export function localQuestion(question) {
   const q=question.trim().replace(/[.?!]+$/,'');
+  const compound=compoundRank(q);
+  if (compound?.detailed || compound?.worksheet) return compound;
   if (/^(?:what(?: is|'s) (?:the )?(?:(?:current|active) )?(?:worksheet|sheet)(?: called| name)?|name (?:the )?(?:active|current) (?:worksheet|sheet))$/i.test(q)) return {kind:'sheet'};
   if (/^(?:(?:find|show|list|check for|report) (?:the |all |any )?formula errors(?: in (?:this|the current) (?:sheet|worksheet))?)$/i.test(q))
     return {kind:'errors'};
@@ -159,12 +205,50 @@ export function datasetAnswer(intent,d) {
   const headers=datasetColumns(d.values);
   if (intent.kind==='columns') return headers.length+' columns in '+source(d)+': '+headers.join(', ')+'.';
   if (intent.kind==='count') return groupedReply({operation:'count'},d);
+  const fields=resolveRankFields(intent,headers);
+  return groupedReply({operation:intent.operation,...fields},d);
+}
+
+function resolveRankFields(intent,headers) {
   const lookup=label=>{
     const normal=v=>v.trim().toLowerCase().replace(/^total\s+/,'').replace(/\s+/g,' ');
     const exact=headers.filter(h=>h.toLowerCase()===label.trim().toLowerCase());
-    const matches=exact.length?exact:headers.filter(h=>normal(h)===normal(label));
+    let matches=exact.length?exact:headers.filter(h=>normal(h)===normal(label));
+    if (!matches.length && /^(?:product )?categor(?:y|ies)$/i.test(label.trim()))
+      matches=headers.filter(h=>/^(?:product )?categor(?:y|ies)$/i.test(h.trim()));
+    if (!matches.length && /^(?:sales|revenue)$/i.test(label.trim()))
+      matches=headers.filter(h=>normal(h).replace(/\s*\([A-Z]{3}\)$/i,'')===normal(label));
     if (matches.length!==1) throw Error('Which column do you mean by “'+label+'”? Available columns: '+headers.slice(0,12).join(', ')+'.');
     return matches[0];
   };
-  return groupedReply({operation:intent.operation,dimension:lookup(intent.dimension),measure:lookup(intent.measure)},d);
+  return {dimension:lookup(intent.dimension),measure:lookup(intent.measure)};
+}
+
+
+export function rankedAnalysis(intent,d) {
+  const headers=datasetColumns(d.values);
+  const fields=resolveRankFields(intent,headers);
+  const result=summariseBy(d,fields.measure,fields.dimension);
+  if (!result.groups.length) throw Error('No eligible numeric rows in '+source(d)+'. Check the sales and category cells.');
+  if (result.groups.reduce((n,g)=>n+g.records,0)!==result.count)
+    throw Error('The category totals could not be verified against the included record count.');
+  const selected=rect(d.address,DATASET_CELL_LIMIT);
+  const qualify=label=>d.sheet+'!'+a1(selected.r+1,selected.c+headers.indexOf(label),selected.rows-1,1);
+  const dimensionRange=qualify(result.dimension), measureRange=qualify(result.measure);
+  let rank=0;
+  const groups=result.groups.map(({label,sum,records},index)=>{
+    if (index===0 || sum!==result.groups[index-1].sum) rank=index+1;
+    return {label,sum,records,rank};
+  });
+  const best=intent.operation==='lowest'?groups.at(-1).sum:groups[0].sum;
+  const winners=groups.filter(g=>g.sum===best);
+  const money=n=>n.toLocaleString(undefined,{maximumFractionDigits:10});
+  const title=(intent.operation==='lowest'?'Lowest':'Highest')+' total '+result.measure;
+  const top=winners.slice(0,8).map(g=>g.label).join(', ');
+  const text=title+': '+top+' · '+money(best)+(winners.length>1?' ('+winners.length+' tied categories)':'')+'.\n\n'+
+    'I summed numeric values in '+measureRange+' for each matching value in '+dimensionRange+
+    '. Ranked by total, highest first. '+result.count+' rows included, '+result.omitted+
+    ' rows omitted because a group or measure was missing, invalid, or an Excel error. Empty rows are excluded. '+
+    'Category labels are grouped exactly as entered. Repeated records are counted separately. Scope: '+source(d)+'.';
+  return {text,groups,measure:result.measure,dimension:result.dimension};
 }

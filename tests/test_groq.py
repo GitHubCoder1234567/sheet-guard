@@ -70,3 +70,12 @@ class GroqTests(unittest.TestCase):
                     req.do_POST()
                 self.assertEqual(req.response[0],expected)
                 self.assertNotIn("fake-test-key",json.dumps(req.response))
+
+    def test_inspection_may_be_followed_by_a_calculation_but_not_a_repeated_inspection(self):
+        data = {"question": "Calculate sales totals", "toolResult": {"calculationPending": True}}
+        allowed = plan(tool="AggregateData", measure="Sales", operation="total")
+        with patch.object(server, "urlopen", return_value=envelope(allowed)):
+            self.assertEqual(server.groq_reason(data, "test-key"), allowed)
+        with patch.object(server, "urlopen", return_value=envelope(plan(tool="InspectRange"))):
+            with self.assertRaises(ValueError):
+                server.groq_reason(data, "test-key")

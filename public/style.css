@@ -51,3 +51,8 @@ header p{font-size:11px;margin:4px 0 0}
 .tools summary,.explanation summary{padding:4px 0}
 #notice{background:#edf1e9}
 .chat-error{color:#802c24;background:#fff2ee;border:1px solid #e2b7ae;border-radius:8px;padding:8px}
+.ranking-wrap{overflow-x:auto}
+.ranking-table{border-collapse:collapse;width:100%;font-size:12px;text-align:left}
+.ranking-table caption{text-align:left;font-weight:650;padding:6px 0}
+.ranking-table th,.ranking-table td{border-bottom:1px solid var(--line);padding:6px;overflow-wrap:anywhere}
+.ranking-table th:nth-child(n+3),.ranking-table td:nth-child(n+3){text-align:right;font-variant-numeric:tabular-nums}

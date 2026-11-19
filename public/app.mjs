@@ -1,7 +1,7 @@
 import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
 import {activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
-import {datasetAnswer, executeTool, localQuestion} from './agent.mjs';
+import {calculationGoal, calculatesGoal, datasetAnswer, executeTool, explicitAudit, localQuestion, rankedAnalysis} from './agent.mjs';
 
 const nav = document.querySelector('#nav'), main = document.querySelector('#main');
 const notice = document.querySelector('#notice'), connection = document.querySelector('#connection');
@@ -579,6 +579,7 @@ function chatView() {
   main.append(suggestions);
   for (const m of state.messages.slice(-18)) {
     const item=block(node('div',m.role==='user'?'You':'Forma','meta'),node('p',m.text,'chat'));
+    if (m.report) item.append(rankingTable(m));
     if (m.proposal && !state.dismissed.has(m.proposal.id)) item.append(button('Review proposal',()=>{
       state.filter='All';setTab('Recommendations');}));
     if (m.role==='user') item.classList.add('mine');main.append(item);
@@ -594,6 +595,32 @@ function chatView() {
       recommendations(state.workspaceMode==='insights',true);
     }
   }
+}
+function rankingTable(message) {
+  const report=message.report, pageSize=25;
+  const pages=Math.ceil(report.groups.length/pageSize), page=message.page??0;
+  const table=node('table',undefined,'ranking-table'), caption=node('caption','Ranked totals · '+report.groups.length.toLocaleString()+' groups');
+  const header=node('thead'), columns=node('tr');
+  for (const label of ['Rank',report.dimension,report.measure,'Rows']) columns.append(node('th',label));
+  header.append(columns);table.append(caption,header);
+  const body=node('tbody');
+  for (const group of report.groups.slice(page*pageSize,(page+1)*pageSize)) {
+    const row=node('tr');
+    for (const value of [group.rank,group.label,group.sum.toLocaleString(undefined,{maximumFractionDigits:10}),group.records])
+      row.append(node('td',value));
+    body.append(row);
+  }
+  table.append(body);
+  const wrap=node('div',undefined,'ranking-wrap');
+  wrap.append(table);
+  if (pages>1) {
+    const controls=node('div',undefined,'actions');
+    const change=delta=>{message.page=page+delta;render();};
+    controls.append(button('Previous',()=>change(-1),{enabled:page>0}),
+      node('span',(page+1)+' / '+pages,'muted'),button('Next',()=>change(1),{enabled:page+1<pages}));
+    wrap.append(controls);
+  }
+  return wrap;
 }
 async function captureDataset(target,expand=false) {
   state.datasetController=new AbortController();
@@ -686,7 +713,7 @@ async function submitQuestion(question,work) {
 async function answerLocal(question,intent) {
   const query=question.replace(/[.!]$/,'');
   const total=/^(?:show me |calculate )?total (.+) by (.+)$/i.exec(query);
-  let reply;
+  let reply, report;
   if (intent.kind==='sheet') {
     const sheet=await activeWorksheet();
     reply='The current worksheet is “'+sheet.name+'”.';
@@ -702,7 +729,12 @@ async function answerLocal(question,intent) {
       (errors.length>12?' (first 12 shown).':'.'):'No Excel error values found in '+scope+'.')+
       (snapshot?.partial?' This was a bounded sample.':'');
   } else if (['count','columns','rank'].includes(intent.kind)) {
-    reply=datasetAnswer(intent,await captureDataset(undefined,true));
+    const sheet=intent.worksheet?await activeWorksheet():null;
+    const data=await captureDataset(sheet?{sheetId:sheet.id,used:true}:undefined,true);
+    if (intent.kind==='rank' && intent.detailed) {
+      report=rankedAnalysis(intent,data);
+      reply=report.text;
+    } else reply=datasetAnswer(intent,data);
   } else if (total) {
     const data=await captureDataset(undefined,true), result=summariseBy(data,total[1],total[2]);
     const top=result.groups.slice(0,12).map(({label,sum,records})=>
@@ -722,7 +754,7 @@ async function answerLocal(question,intent) {
     reply=s.name+'!'+s.address+'\n'+description+'\n\n'+expression+'\nCurrent result: '+s.display[0][0]+
       (refs.length?'\nReferences: '+refs.join(', '):'');
   }
-  state.messages.push({role:'assistant',text:reply});return '';
+  state.messages.push({role:'assistant',text:reply,report});return '';
 }
 async function requestAgent(payload) {
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),22000);
@@ -751,7 +783,8 @@ async function requestAgent(payload) {
         typeof data.option!=='string' || !Number.isInteger(data.finding) ||
         (data.tool!==undefined && typeof data.tool!=='string'))
       throw Error('The AI service returned an invalid answer. Try asking a narrower question.');
-    if (payload.toolResult && data.tool && data.tool!=='none') throw Error('The AI requested another tool after receiving the workbook evidence.');
+    if (payload.toolResult && data.tool && data.tool!=='none' &&
+        !(payload.toolResult.calculationPending===true && ['AggregateData','AnalyseColumn'].includes(data.tool))) throw Error('The AI requested another tool after receiving the workbook evidence.');
     return data;
   } finally {clearTimeout(timeout);}
 }
@@ -776,12 +809,23 @@ async function ask(question,conversation) {
     });
     const payload={question,selection:context,workbook,findings:findings.map(f=>({title:f.title,detail:f.detail.slice(0,240),
       target:findingAddress(f),actionable:!!f.action&&available(f.action)})),conversation};
+    const goal=calculationGoal(question);
+    if (goal==='unsupported') throw Error('Forma cannot verify that statistic with its current calculation tools.');
     let result=await requestAgent(payload);
     let routedProposal;
-    if (result.tool && result.tool!=='none') {
+    const needsCalculation=!!goal;
+    const requested=new Set();
+    for (let step=0;step<2 && result.tool && result.tool!=='none';step++) {
+      if (requested.has(result.tool)) throw Error('The assistant repeated its workbook request. Select a specific range and try again.');
+      requested.add(result.tool);
+      if (needsCalculation && !['InspectWorkbook','InspectWorksheet','InspectRange'].includes(result.tool) &&
+          !calculatesGoal(goal,result))
+        throw Error('No calculation was performed. Select the relevant data and specify the measure or grouping column.');
       let outcome;
       try {outcome=await executeTool(result,{sheets:state.sheets,snapshots:state.snapshots,
         selection:anchor?{...s,...anchor}:null,readRange:readContext,
+        detailed:goal==='ranking'||needsCalculation&&/\b(?:rank|all|every|explain|source)\b/i.test(question),
+        rankingOperation:goal==='ranking'&&/\blowest\b/i.test(question)?'lowest':undefined,
         readDataset:target=>{
           if (!target&&!anchor) throw Error('Select the dataset, including its header.');
           return captureDataset(target??{sheetId:anchor.id,address:anchor.address},true);
@@ -792,7 +836,7 @@ async function ask(question,conversation) {
         throw Error(operation+' failed. '+error.message);
       }
       if (outcome.local) {
-        state.messages.push({role:'assistant',text:outcome.local});
+        state.messages.push({role:'assistant',text:outcome.local,report:outcome.report});
         return '';
       }
       if (outcome.compare) {
@@ -806,8 +850,16 @@ async function ask(question,conversation) {
           throw Error('Select the intended range directly in Excel before requesting a change.');
         if (!s) throw Error('Select a smaller editable range before requesting a proposal.');
       }
-      if (outcome.evidence) result=await requestAgent({question,toolResult:outcome.evidence,findings:payload.findings});
+      if (outcome.evidence) {
+        result=await requestAgent({question,toolResult:{...outcome.evidence,calculationPending:needsCalculation&&step===0}});
+        continue;
+      }
+      break;
     }
+    if (needsCalculation)
+      throw Error('No calculation was performed. Select the source data and include the exact column headings in your question.');
+    if (result.intent==='audit' && !explicitAudit(question))
+      throw Error('Forma could not match that request to a workbook action. Describe the analysis or change you want, or name the relevant range.');
     const message={role:'assistant',text:routedProposal?'Review the proposed change before applying it.':result.reply.trim()};
     if (routedProposal || (result.finding<0 && result.intent!=='none' && result.intent!=='audit')) {
       if (!s) throw Error('Select the affected range to prepare the proposal.');
