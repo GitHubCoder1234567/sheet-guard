@@ -140,3 +140,31 @@ export async function executeTool(call,context) {
     }
   }
 }
+
+export function localQuestion(question) {
+  const q=question.trim().replace(/[.?!]+$/,'');
+  if (/^(?:what(?: is|'s) (?:the )?(?:(?:current|active) )?(?:worksheet|sheet)(?: called| name)?|name (?:the )?(?:active|current) (?:worksheet|sheet))$/i.test(q)) return {kind:'sheet'};
+  if (/^(?:(?:find|show|list|check for|report) (?:the |all |any )?formula errors(?: in (?:this|the current) (?:sheet|worksheet))?)$/i.test(q))
+    return {kind:'errors'};
+  if (/^(?:how many (?:data )?(?:records|rows)(?: (?:are there|are in|in)(?: (?:this|the|my) (?:dataset|selection|table))?)?|count (?:the )?(?:records|rows)(?: in (?:this|the|my) (?:dataset|selection|table))?)$/i.test(q)) return {kind:'count'};
+  if (/^(?:what (?:columns|headers) (?:are (?:in|there in) (?:this|the|my) (?:dataset|selection|table)|are there)|list (?:the )?(?:column (?:names|headers)|columns|headers)(?: in (?:this|the|my) (?:dataset|selection|table))?)$/i.test(q)) return {kind:'columns'};
+  const rank=/^which (.+?) (?:has|had|generates?) (?:the )?(highest|lowest) (?:total )?(.+)$/i.exec(q);
+  if (rank) return {kind:'rank',dimension:rank[1],operation:rank[2].toLowerCase(),measure:rank[3]};
+  if (/^explain (?:this|the selected) (?:formula|calculation)$/i.test(q)) return {kind:'formula'};
+  if (/^(?:show me |calculate )?total .+ by .+$/i.test(q)) return {kind:'group'};
+  return null;
+}
+
+export function datasetAnswer(intent,d) {
+  const headers=datasetColumns(d.values);
+  if (intent.kind==='columns') return headers.length+' columns in '+source(d)+': '+headers.join(', ')+'.';
+  if (intent.kind==='count') return groupedReply({operation:'count'},d);
+  const lookup=label=>{
+    const normal=v=>v.trim().toLowerCase().replace(/^total\s+/,'').replace(/\s+/g,' ');
+    const exact=headers.filter(h=>h.toLowerCase()===label.trim().toLowerCase());
+    const matches=exact.length?exact:headers.filter(h=>normal(h)===normal(label));
+    if (matches.length!==1) throw Error('Which column do you mean by “'+label+'”? Available columns: '+headers.slice(0,12).join(', ')+'.');
+    return matches[0];
+  };
+  return groupedReply({operation:intent.operation,dimension:lookup(intent.dimension),measure:lookup(intent.measure)},d);
+}

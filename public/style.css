@@ -50,3 +50,4 @@ header p{font-size:11px;margin:4px 0 0}
 .tools{padding:8px 0}
 .tools summary,.explanation summary{padding:4px 0}
 #notice{background:#edf1e9}
+.chat-error{color:#802c24;background:#fff2ee;border:1px solid #e2b7ae;border-radius:8px;padding:8px}

@@ -1,7 +1,7 @@
 import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
-import {readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
+import {activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
-import {executeTool} from './agent.mjs';
+import {datasetAnswer, executeTool, localQuestion} from './agent.mjs';
 
 const nav = document.querySelector('#nav'), main = document.querySelector('#main');
 const notice = document.querySelector('#notice'), connection = document.querySelector('#connection');
@@ -532,6 +532,10 @@ function chatView() {
   form.append(field('Workbook question',input));
   const send=button('Send',()=>{},{primary:true});send.type='submit';
   form.append(send);
+  if (state.chatError && !state.busy) {
+    const error=node('p',state.chatError,'chat-error');
+    error.setAttribute('role','alert');form.append(error);
+  }
   form.addEventListener('submit',event=>{
     event.preventDefault();
     const q=state.draft.trim();
@@ -551,14 +555,16 @@ function chatView() {
     if (/^create (?:a )?pivot\s*table for total .+ by .+[.!]?$/i.test(q)) {
       state.draft='';run(()=>preparePivot(q),'Preparing report…');return;
     }
-    if (/^(?:(?:show me |calculate )?total .+ by .+|explain (?:this|the selected) (?:formula|calculation))[.!]?$/i.test(q)) {
-      state.draft='';run(()=>answerLocal(q),'Reading selected cells…');return;
+    const local=localQuestion(q);
+    if (local) {
+      run(()=>submitQuestion(q,()=>answerLocal(q,local)),'Reading workbook…');return;
     }
     if (!state.consent) {
-      notice.textContent='Enable AI data sharing in Settings to send this question. Local reviews and calculations stay in Excel.';
+      state.chatError='Enable AI data sharing in Settings to send this question. Local reviews and calculations stay in Excel.';
+      render();
       return;
     }
-    run(()=>ask(q),'Working on your question…');
+    run(()=>submitQuestion(q,conversation=>ask(q,conversation)),'Working on your question…');
   });
   main.append(form);
   if (state.datasetController) main.append(button('Cancel reading',()=>state.datasetController.abort(),{during:true}));
@@ -658,13 +664,47 @@ async function preparePivot(question) {
   return '';
 }
 
-async function answerLocal(question) {
-  state.messages.push({role:'user',text:question});
+async function submitQuestion(question,work) {
+  state.chatError='';
+  const conversation=state.messages.filter(m=>!m.failed).slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
+  const previous=state.messages.at(-1);
+  const turn=previous?.failed && previous.text===question?previous:{role:'user',text:question};
+  if (turn!==previous) state.messages.push(turn);
+  try {
+    const status=await work(conversation);
+    turn.failed=false;
+    state.draft='';
+    return status;
+  } catch(error) {
+    turn.failed=true;
+    state.draft=question;
+    state.chatError=error.name==='AbortError'?'The request was interrupted or timed out. Try again.':error.message;
+  } finally {
+    if (state.messages.length>60) state.messages.splice(0,state.messages.length-60);
+  }
+}
+async function answerLocal(question,intent) {
   const query=question.replace(/[.!]$/,'');
   const total=/^(?:show me |calculate )?total (.+) by (.+)$/i.exec(query);
   let reply;
-  if (total) {
-    const data=await captureDataset(), result=summariseBy(data,total[1],total[2]);
+  if (intent.kind==='sheet') {
+    const sheet=await activeWorksheet();
+    reply='The current worksheet is “'+sheet.name+'”.';
+  } else if (intent.kind==='errors') {
+    const sheet=await activeWorksheet();
+    const {snapshots}=await scan(undefined,undefined,new Set([sheet.id]),true);
+    const snapshot=snapshots[0];
+    const errors=[];
+    if (snapshot) for (let r=0;r<snapshot.values.length;r++) for (let c=0;c<snapshot.values[r].length;c++)
+      if (snapshot.types[r][c]==='Error') errors.push(a1(snapshot.row+r,snapshot.column+c)+' '+snapshot.display[r][c]);
+    const scope=snapshot?sheet.name+'!'+a1(snapshot.row,snapshot.column,snapshot.values.length,snapshot.values[0].length):sheet.name;
+    reply=(errors.length?'Found '+errors.length+' Excel error values in '+scope+': '+errors.slice(0,12).join(', ')+
+      (errors.length>12?' (first 12 shown).':'.'):'No Excel error values found in '+scope+'.')+
+      (snapshot?.partial?' This was a bounded sample.':'');
+  } else if (['count','columns','rank'].includes(intent.kind)) {
+    reply=datasetAnswer(intent,await captureDataset(undefined,true));
+  } else if (total) {
+    const data=await captureDataset(undefined,true), result=summariseBy(data,total[1],total[2]);
     const top=result.groups.slice(0,12).map(({label,sum,records})=>
       label+': '+sum.toLocaleString(undefined,{maximumFractionDigits:8})+' ('+records+' rows)');
     reply='Total '+result.measure+' by '+result.dimension+'\n\n'+(top.join('\n')||'No eligible numeric rows.')+
@@ -692,17 +732,31 @@ async function requestAgent(payload) {
     headers.Authorization='Basic '+btoa(String.fromCharCode(...bytes));
   }
   try {
-    const response=await fetch('/api/agent',{method:'POST',headers,body:JSON.stringify(payload),signal:controller.signal});
-    const data=await response.json();
-    if (!response.ok) throw Error(data.error || 'AI request failed.');
+    let response;
+    try {
+      response=await fetch('/api/agent',{method:'POST',headers,body:JSON.stringify(payload),signal:controller.signal});
+    } catch (error) {
+      if (error.name==='AbortError') throw error;
+      throw Error('Forma could not reach its AI service. Check your connection and try again.');
+    }
+    const data=await response.json().catch(()=>null);
+    if (!response.ok) {
+      if (data && typeof data.error==='string' && data.error.trim()) throw Error(data.error);
+      if (response.status===401) throw Error('Enter the deployment access password in Forma Settings.');
+      if (response.status===429) throw Error('The AI service is rate limited. Wait a moment and try again.');
+      throw Error('The AI service returned HTTP '+response.status+'. Try again shortly.');
+    }
+    if (!data || typeof data.reply!=='string' || !data.reply.trim() ||
+        !['none','audit','style','number','chart','dashboard','negative','heatmap','dataBar'].includes(data.intent) ||
+        typeof data.option!=='string' || !Number.isInteger(data.finding) ||
+        (data.tool!==undefined && typeof data.tool!=='string'))
+      throw Error('The AI service returned an invalid answer. Try asking a narrower question.');
+    if (payload.toolResult && data.tool && data.tool!=='none') throw Error('The AI requested another tool after receiving the workbook evidence.');
     return data;
   } finally {clearTimeout(timeout);}
 }
 
-async function ask(question) {
-  const conversation=state.messages.slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
-  state.messages.push({role:'user',text:question});state.draft='';render();
-  try {
+async function ask(question,conversation) {
     let anchor,s;
     try {
       anchor=await selectionAnchor();
@@ -725,12 +779,18 @@ async function ask(question) {
     let result=await requestAgent(payload);
     let routedProposal;
     if (result.tool && result.tool!=='none') {
-      const outcome=await executeTool(result,{sheets:state.sheets,snapshots:state.snapshots,
+      let outcome;
+      try {outcome=await executeTool(result,{sheets:state.sheets,snapshots:state.snapshots,
         selection:anchor?{...s,...anchor}:null,readRange:readContext,
         readDataset:target=>{
           if (!target&&!anchor) throw Error('Select the dataset, including its header.');
           return captureDataset(target??{sheetId:anchor.id,address:anchor.address},true);
         }});
+      } catch(error) {
+        if (error.name==='AbortError') throw error;
+        const operation=result.tool.replace(/([a-z])([A-Z])/g,'$1 $2');
+        throw Error(operation+' failed. '+error.message);
+      }
       if (outcome.local) {
         state.messages.push({role:'assistant',text:outcome.local});
         return '';
@@ -748,30 +808,22 @@ async function ask(question) {
       }
       if (outcome.evidence) result=await requestAgent({question,toolResult:outcome.evidence,findings:payload.findings});
     }
-    const message={role:'assistant',text:routedProposal?'Review the proposed change before applying it.':result.reply};
+    const message={role:'assistant',text:routedProposal?'Review the proposed change before applying it.':result.reply.trim()};
+    if (routedProposal || (result.finding<0 && result.intent!=='none' && result.intent!=='audit')) {
+      if (!s) throw Error('Select the affected range to prepare the proposal.');
+      try {message.proposal=await makeManual(s,routedProposal||result.intent,result.option);}
+      catch(error) {throw Error('Could not prepare the proposal. '+error.message);}
+    } else if (result.finding>=0) {
+      if (!findings[result.finding]?.action) throw Error('The recommended workbook action is no longer available.');
+      message.proposal=findings[result.finding];
+    }
+    if (result.intent==='audit') {
+      state.workspaceMode='review';
+      await doScan();
+      message.text='Workbook review complete. Open the findings below for the affected cells and evidence.';
+    }
     state.messages.push(message);
-    try {
-      if (routedProposal) {
-        message.proposal=await makeManual(s,routedProposal,result.option);
-        return '';
-      }
-      if (result.intent==='audit') {
-        state.workspaceMode='review';
-        return await doScan();
-      }
-      if (result.finding>=0 && findings[result.finding]?.action) message.proposal=findings[result.finding];
-      else if (result.intent!=='none') {
-        if (!s) throw Error('Select the affected range to prepare the proposal.');
-        message.proposal=await makeManual(s,result.intent,result.option);
-      }
-    } catch (error) {message.text+='\n\n'+error.message;}
     return '';
-  } catch (error) {
-    state.messages.push({role:'assistant',text:error.name==='AbortError'?'The AI request timed out. Try again.':error.message});
-    return 'AI request ended without a workbook change.';
-  } finally {
-    if (state.messages.length>60) state.messages.splice(0,state.messages.length-60);
-  }
 }
 function historyView() {
   if (!state.history.length) {main.append(node('p','Approved changes, declined suggestions and verification results will appear here.','muted'));return;}

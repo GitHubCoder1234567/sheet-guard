@@ -13,15 +13,16 @@ const content = s => [s.formulas.map((row,r) => row.map((value,c) =>
   typeof value === 'string' && value.startsWith('=') && value !== s.values[r][c] ? value : s.values[r][c]))];
 const checkCancel = signal => { if (signal?.aborted) throw new DOMException('Scan cancelled.', 'AbortError'); };
 
-export async function scan(signal,onProgress,sheetIds) {
+export async function scan(signal,onProgress,sheetIds,explicit=false) {
   const sheets = await Excel.run(async ctx => {
     const collection = ctx.workbook.worksheets;
     collection.load('items/id,items/name,items/visibility');
     await ctx.sync();
     return collection.items.map(s=>({id:s.id,name:s.name,visibility:s.visibility}));
   });
-  const visible=sheets.filter(s=>s.visibility==='Visible').slice(0,12);
-  const targets=sheetIds?visible.filter(s=>sheetIds.has(s.id)):visible;
+  const visible=sheets.filter(s=>s.visibility==='Visible');
+  const eligible=explicit&&sheetIds?visible:visible.slice(0,12);
+  const targets=sheetIds?eligible.filter(s=>sheetIds.has(s.id)):eligible;
   const snapshots = [];
   for (const {id} of targets) {
     checkCancel(signal);
@@ -597,5 +598,14 @@ export async function selectionAnchor() {
     if (sheet.visibility!=='Visible') throw Error('Select cells on a visible worksheet.');
     return {id:sheet.id,name:sheet.name,address:a1(range.rowIndex,range.columnIndex,range.rowCount,range.columnCount),
       rows:range.rowCount,columns:range.columnCount};
+  });
+}
+
+export async function activeWorksheet() {
+  return Excel.run(async ctx=>{
+    const sheet=ctx.workbook.worksheets.getActiveWorksheet();
+    sheet.load('id,name');
+    await ctx.sync();
+    return {id:sheet.id,name:sheet.name};
   });
 }

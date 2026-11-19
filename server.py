@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import ssl
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from threading import BoundedSemaphore
+from threading import BoundedSemaphore, Thread
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -169,6 +169,24 @@ def reason(data, key):
     raise ValueError("The model did not return a complete plan. Try a narrower question.")
 
 
+def verify_groq_startup():
+    """Run an explicitly enabled staging check without workbook data or secret output."""
+    provider, key = provider_config()
+    if provider != "groq" or not key:
+        outcome = "unconfigured"
+    else:
+        try:
+            result = groq_reason({"question": "Reply with a short greeting. No workbook tool or edit is needed."}, key)
+            outcome = "passed" if result["tool"] == "none" and result["intent"] == "none" and result["finding"] == -1 else "unexpected-plan"
+        except HTTPError as error:
+            outcome = "http-" + str(error.code)
+        except (TimeoutError, URLError):
+            outcome = "timeout-or-network"
+        except (ValueError, TypeError):
+            outcome = "invalid-structured-response"
+    print("Forma Groq staging smoke: " + outcome, flush=True)
+
+
 class Handler(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".mjs": "text/javascript",
                       ".css": "text/css", ".png": "image/png"}
@@ -220,7 +238,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
             return self.respond(403, {"error": "Open the Forma task pane to make this request."})
         if not self.authorized():
-            return self.respond(401, {"error": "AI access requires credentials from your administrator."})
+            return self.respond(401, {"error": "Forma access password missing or incorrect. Enter the deployment access password in Forma Settings."})
         if self.headers.get_content_type() != "application/json":
             return self.respond(415, {"error": "Expected JSON."})
         try:
@@ -272,4 +290,6 @@ if __name__ == "__main__":
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
+    if os.getenv("FORMA_VERIFY_GROQ") == "1" and os.getenv("RENDER_SERVICE_NAME") == "forma-excel-staging":
+        Thread(target=verify_groq_startup, daemon=True).start()
     server.serve_forever()
