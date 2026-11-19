@@ -7,7 +7,8 @@ from pathlib import Path
 import ssl
 from http.client import IncompleteRead
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from threading import BoundedSemaphore, Thread
+from threading import BoundedSemaphore, Lock, Thread
+from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -312,6 +313,30 @@ def verify_groq_startup():
         print("Forma Groq staging smoke: " + name + " " + outcome, flush=True)
 
 
+DIAGNOSTIC_LOCK = Lock()
+DIAGNOSTIC_CACHE = None
+
+
+def probe_groq():
+    provider, key = provider_config()
+    if provider != "groq" or not key:
+        return {"status": "not_tested", "category": "provider_unconfigured"}
+    try:
+        result = groq_reason({"question": "Reply with a short greeting. Use no workbook tools."}, key)
+        if result["tool"] != "none" or result["intent"] != "none" or result["finding"] != -1:
+            return {"status": "failed", "category": "invalid_tool_sequence"}
+        return {"status": "passed", "category": "structured_greeting"}
+    except GroqProtocolError as error:
+        return {"status": "failed", "category": error.category}
+    except HTTPError as error:
+        category = ("provider_auth" if error.code in (401, 403) else
+                    "provider_rate_limit" if error.code == 429 else "provider_http")
+        error.close()
+        return {"status": "failed", "category": category, "upstreamStatus": error.code}
+    except (TimeoutError, URLError, IncompleteRead):
+        return {"status": "failed", "category": "network_or_timeout"}
+
+
 class Handler(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".mjs": "text/javascript",
                       ".css": "text/css", ".png": "image/png"}
@@ -348,7 +373,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.respond(200, {"status": "ok"})
+            commit = os.getenv("RENDER_GIT_COMMIT", "")
+            build = commit[:12] if len(commit) == 40 and all(c in "0123456789abcdef" for c in commit) else "development"
+            self.respond(200, {"status": "ok", "build": build})
+        elif self.path == "/api/diagnostics":
+            if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+                return self.respond(403, {"error": "Open the Forma task pane to make this request."})
+            if not self.authorized():
+                return self.respond(401, {"error": "Access password required."})
+            provider, key = provider_config()
+            self.respond(200, {"provider": provider if provider in ("groq", "openai") else "unsupported",
+                               "configured": bool(key)})
         elif self.path.startswith("/api/"):
             self.respond(404, {"error": "Unknown endpoint."})
         else:
@@ -357,7 +392,36 @@ class Handler(SimpleHTTPRequestHandler):
     def list_directory(self, path):
         self.send_error(404)
 
+    def diagnostic_probe(self):
+        global DIAGNOSTIC_CACHE
+        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+            return self.respond(403, {"error": "Open the Forma task pane to make this request."})
+        if not self.authorized():
+            return self.respond(401, {"error": "Access password required."})
+        if self.headers.get_content_type() != "application/json" or self.headers.get("Content-Length") != "2":
+            return self.respond(400, {"error": "Diagnostics only accepts an empty object."})
+        if self.rfile.read(2) != b"{}":
+            return self.respond(400, {"error": "Diagnostics only accepts an empty object."})
+        if not DIAGNOSTIC_LOCK.acquire(blocking=False):
+            return self.respond(429, {"error": "A diagnostic check is already running."})
+        try:
+            if DIAGNOSTIC_CACHE and monotonic()-DIAGNOSTIC_CACHE[0] < 60:
+                return self.respond(200, DIAGNOSTIC_CACHE[1])
+            if not SLOTS.acquire(blocking=False):
+                return self.respond(429, {"error": "The AI provider is busy."})
+            try:
+                result = probe_groq()
+            finally:
+                SLOTS.release()
+            DIAGNOSTIC_CACHE = (monotonic(), result)
+            provider_diagnostic("diagnostic_probe", uuid4().hex[:12], result["category"], status=result.get("upstreamStatus"))
+            return self.respond(200, result)
+        finally:
+            DIAGNOSTIC_LOCK.release()
+
     def do_POST(self):
+        if self.path == "/api/diagnostics":
+            return self.diagnostic_probe()
         if self.path != "/api/agent":
             return self.respond(404, {"error": "Unknown endpoint."})
         if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):

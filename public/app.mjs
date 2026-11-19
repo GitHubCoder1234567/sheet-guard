@@ -1,5 +1,8 @@
+import {calculateColumn} from './calculation.mjs';
+import {runDiagnostics, runLightDiagnostics} from './diagnostics.mjs';
+import {discoverRegions, chooseDiscoveredRegion} from './discovery.mjs';
 import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
-import {visibleWorksheetByName, selectEvidenceRange, activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
+import {inspectActiveObjects, visibleWorksheetByName, selectEvidenceRange, activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
 import {aggregationEvidence, sameEvidence, evidenceIntent, evidenceGroup, foldLabel} from './evidence.mjs';
 import {calculationGoal, calculatesGoal, datasetAnswer, executeTool, explicitAudit, localQuestion, rankedAnalysis} from './agent.mjs';
@@ -141,6 +144,26 @@ function auditView() {
   if (partial.length || state.omitted) main.append(node('p',
     (partial.length?'Sampled ranges on '+partial.join(', ')+'. ':'')+
     (state.omitted?state.omitted+' visible sheet(s) beyond the scan limit.':''),'muted'));
+  main.append(button('Discover active worksheet',()=>run(async()=>{
+    const active=await activeWorksheet();
+    const info=await inspectActiveObjects();
+    const result=state.snapshots.find(s=>s.id===active.id);
+    const sample=result?discoverRegions({...result,address:a1(result.row,result.column,result.values.length,result.values[0].length)}):null;
+    state.discovery={active,info,sample};
+    return 'Worksheet discovery complete.';
+  },'Inspecting worksheet structure…')));
+  if (state.discovery) {
+    const {active,info,sample}=state.discovery;
+    const found=block(node('h3',active.name),node('p',
+      (info.used?'Used range '+info.used.address:'No populated cells')+' · '+(info.protected===true?'Protected':'Protection not reported as enabled')));
+    for (const table of info.tables) found.append(node('p',table.name+' · '+table.address,'address'));
+    if (sample) {
+      found.append(node('p','Inferred regions · '+sample.coverage,'meta'));
+      for (const region of sample.regions.slice(0,8)) found.append(node('p',region.address+' · '+region.confidence+' · '+region.headers.join(', ')));
+      for (const item of sample.ambiguous.slice(0,8)) found.append(node('p',item.address+' · '+item.reason,'muted'));
+    }
+    main.append(found);
+  }
   const structure=node('details');
   structure.append(node('summary','Workbook structure'));
   for (const sheet of state.sheets.slice(0,30)) {
@@ -568,6 +591,11 @@ function chatView() {
       setTab('History');
       return;
     }
+    const numericRequest=/^(?:calculate (?:the )?)?(sum|average|minimum|maximum|median|numeric count|non-empty count|distinct count) of (.+) in (?:the |this |my )?selection[.!?]?$/i.exec(q);
+    if (numericRequest) {
+      run(()=>submitQuestion(q,()=>answerColumn(numericRequest[1].toLowerCase(),numericRequest[2])),'Reading selected column…');
+      return;
+    }
     const evidenceRequest=evidenceIntent(q);
     const local=localQuestion(q);
     if (evidenceRequest && (!local || (state.evidence && evidenceRequest==='normalise'))) {
@@ -620,7 +648,8 @@ function evidenceRows(message) {
   const section=node('section',undefined,'details');
   section.append(node('h4','Source records · '+rows.length));
   for (const row of rows.slice(page*size,(page+1)*size)) {
-    const label=message.sheet+'!'+row.groupCell+' · '+row.label+' / '+message.sheet+'!'+row.measureCell+' = '+row.value;
+    const label=(row.groupCell?message.sheet+'!'+row.groupCell+' · '+row.label+' / ':'')+
+      message.sheet+'!'+row.measureCell+' = '+row.value;
     section.append(node('p',label+(row.identifier===null?'':' · '+row.identifierCell+' '+row.identifier)));
     if (row.displayed!==null && row.displayed!==String(row.value))
       section.append(node('p','Displayed in Excel: '+row.displayed,'muted'));
@@ -647,11 +676,24 @@ function evidenceRows(message) {
   return section;
 }
 
+async function answerColumn(operation,column) {
+  const data=await captureDataset(undefined,true,true);
+  const result=calculateColumn(data,{operation,column});
+  state.evidence=null;
+  const rows=result.contributors.map(cell=>({measureCell:cell.address,value:cell.raw,
+    identifier:null,displayed:cell.displayed}));
+  state.messages.push({role:'assistant',text:operation+' of '+result.field+' · '+
+    result.result.toLocaleString(undefined,{maximumFractionDigits:10})+
+    '. Source: '+result.source.sheet+'!'+result.source.range+'. '+result.counts.included+
+    ' included, '+result.counts.excluded+' excluded. Scope: '+result.scope+'.'+
+    (operation==='distinct count'?' Distinct text is case-sensitive.':''),rows,sheet:result.source.sheet,sheetId:result.source.sheetId});
+}
 async function answerEvidence(question,kind,exactGroup) {
   const prior=state.evidence;
   if (!prior || prior.sessionId!==state.sessionId) throw Error('Calculate the category totals first so Forma can identify their source rows.');
   const {source,fields}=prior;
-  const data=await captureDataset({sheetId:source.sheetId,address:source.address},false,true);
+  const target=source.table?{sheetId:source.sheetId,table:source.table}:{sheetId:source.sheetId,address:source.address};
+  const data=await captureDataset(target,false,true);
   const current=aggregationEvidence(data,fields,{sessionId:state.sessionId,normalised:prior.grouping!=='exact label'});
   if (!sameEvidence(prior,current)) {
     state.evidence=null;
@@ -843,7 +885,12 @@ async function answerLocal(question,intent) {
       (snapshot?.partial?' This was a bounded sample.':'');
   } else if (['count','columns','rank'].includes(intent.kind)) {
     const sheet=intent.sheetName?await visibleWorksheetByName(intent.sheetName):intent.worksheet?await activeWorksheet():null;
-    const data=await captureDataset(sheet?{sheetId:sheet.id,used:true}:undefined,true,intent.kind==='rank');
+    let data=await captureDataset(sheet?{sheetId:sheet.id,used:true}:undefined,true,intent.kind==='rank');
+    if (sheet && intent.kind==='rank') {
+      const region=chooseDiscoveredRegion(data);
+      if (!region) throw Error('Forma could not identify one unambiguous dataset on this worksheet. Select its header and data cells, then ask for a ranking of the selection.');
+      data=region;
+    }
     if (intent.kind==='rank') {
       report=rankedAnalysis({...intent,sessionId:state.sessionId},data);
       state.evidence=report.evidence;
@@ -1032,7 +1079,54 @@ function historyView() {
     main.append(card);
   });
 }
+function diagnosticSettings() {
+  const section=node('details',undefined,'details');
+  section.open=!!state.diagnosticsOpen;
+  section.addEventListener('toggle',()=>{if(section.isConnected) state.diagnosticsOpen=section.open;});
+  section.append(node('summary','Diagnostics'));
+  section.append(node('p','Read-only checks. The optional provider probe sends a synthetic greeting with no workbook data.'));
+  const live=node('input');live.type='checkbox';live.checked=!!state.diagnosticsProbe;
+  live.addEventListener('change',()=>{state.diagnosticsProbe=live.checked;});
+  section.append(field('Include live Groq check',live));
+  section.append(button('Run diagnostics',()=>run(async()=>{
+    state.diagnosticsOpen=true;
+    const host=({OfficeOnline:'Excel Web',PC:'Excel Windows',Mac:'Excel Mac',iOS:'Excel iPad'})[state.platform]??'Excel';
+    const request=(path,options={})=>{
+      const headers={...options.headers};
+      if (path.startsWith('/api/')&&state.accessPassword) {
+        const bytes=new TextEncoder().encode('sheetguard:'+state.accessPassword);
+        headers.Authorization='Basic '+btoa(String.fromCharCode(...bytes));
+      }
+      return fetch(path,{...options,headers});
+    };
+    state.diagnostics=await runDiagnostics({request,probe:state.diagnosticsProbe,host});
+    return 'Diagnostics complete.';
+  },'Checking workbook access and service health…')));
+  if (state.diagnostics) {
+    const data=state.diagnostics;
+    const label={passed:'Passed',failed:'Failed',unsupported:'Unsupported',not_tested:'Not tested'};
+    const list=node('ul',undefined,'diagnostic-list');
+    for (const result of data.checks) {
+      const item=node('li');
+      item.append(node('strong',result.operation+' · '+label[result.status]),
+        node('p',result.detail,'muted'),node('code',result.category));
+      list.append(item);
+    }
+    section.append(list,button('Download safe diagnostic report',()=>{
+      const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+      const url=URL.createObjectURL(blob), link=node('a');
+      link.href=url;link.download='forma-diagnostics.json';
+      section.append(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }));
+    const text=node('details');
+    text.append(node('summary','View safe report JSON'),node('pre',JSON.stringify(data,null,2)));
+    section.append(text);
+  }
+  return section;
+}
 function settingsView() {
+  main.append(diagnosticSettings());
   const opt=node('input');opt.type='checkbox';opt.checked=state.consent;opt.disabled=state.busy;
   opt.addEventListener('change',()=>{state.consent=opt.checked;render();});
   const label=node('label',undefined,'check');label.append(opt,node('span','Allow AI data sharing for this session'));
@@ -1049,10 +1143,16 @@ function settingsView() {
 }
 render();
 if (typeof Office !== 'undefined') {
-  Office.onReady(info=>{
+  Office.onReady(async info=>{
     state.ready=info.host===Office.HostType.Excel;
-    connection.textContent=state.ready?'Connected to Excel':'Excel host required';
+    state.platform=info.platform;
+    connection.textContent=state.ready?'Checking workbook access…':'Excel host required';
     render();
-    if (state.ready) run(doScan,'Scanning workbook…');
+    if (state.ready) {
+      const checks=await runLightDiagnostics();
+      const readable=checks.some(x=>x.category==='cell_readable');
+      connection.textContent=readable?'Workbook readable':'Excel connected · workbook access not verified';
+      if (readable&&!state.busy) run(doScan,'Scanning workbook…');
+    }
   }).catch(()=>{connection.textContent='Excel connection failed';});
 } else connection.textContent='Office.js unavailable';

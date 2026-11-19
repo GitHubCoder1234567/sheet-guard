@@ -22,11 +22,17 @@ const workbookDouble = `
   }};
   const sheet = {id:'excel-sheet',name:'Monthly',visibility:'Visible',load(){},activate(){},protection:{protected:false,load(){}},
     charts,getUsedRangeOrNullObject:()=>range(),
-    getRange(address){return address==='D1:L17'||address==='D1'?slot:range();}};
-  function range() {
-    return {worksheet:sheet,values,formulas:values,formulasR1C1:values, text:values.map(row=>row.map(String)),
-      valueTypes:values.map(row=>row.map(x=>typeof x==='number'?'Double':'String')),
-      get numberFormat(){return formats;},set numberFormat(value){formats=value;calls.push('number format write');},rowIndex:0,columnIndex:0,rowCount:5,columnCount:2,
+    getRange(address){return address==='D1:L17'||address==='D1'?slot:range(address);}};
+  function range(address='A1:B5') {
+    if (typeof address!=='string') address='A1:B5';
+    const [,x,y,xx=x,yy=y]=/^([A-Z])(\\d+)(?::([A-Z])(\\d+))?$/.exec(address);
+    const rowIndex=Number(y)-1,columnIndex=x.charCodeAt(0)-65,rowCount=Number(yy)-rowIndex,columnCount=xx.charCodeAt(0)-64-columnIndex;
+    const slice=matrix=>matrix.slice(rowIndex,rowIndex+rowCount).map(row=>row.slice(columnIndex,columnIndex+columnCount));
+    return {worksheet:sheet,values:slice(values),formulas:slice(values),formulasR1C1:slice(values),
+      text:slice(values).map(row=>row.map(String)),
+      valueTypes:slice(values).map(row=>row.map(x=>typeof x==='number'?'Double':'String')),
+      get numberFormat(){return slice(formats);},set numberFormat(value){formats=value;calls.push('number format write');},
+      rowIndex,columnIndex,rowCount,columnCount,
       rowHidden:false,columnHidden:false,hasSpill:false,
       select(){window.sheetGuardSelection='A1:B5';},getColumn(){return this;},getResizedRange(){return this;},getOffsetRange(){return this;},
       getMergedAreasOrNullObject(){return {isNullObject:true,load(){}};},
@@ -54,6 +60,9 @@ async function fixture(t, office=workbookDouble, agent=null) {
   page.on('pageerror',e=>errors.push(e.message));
   await page.route(origin+'/**',async route=>{
     const path=new URL(route.request().url()).pathname;
+    if (path==='/health' && !hostedOrigin) return route.fulfill({json:{status:'ok',build:'fa1f913'}});
+    if (path==='/api/diagnostics' && !hostedOrigin) return route.fulfill({json:route.request().method()==='POST'?
+      {status:'passed',category:'structured_greeting'}:{configured:true,provider:'groq'}});
     if (path==='/api/agent' && agent) {
       const result=agent(route.request().postDataJSON());
       return route.fulfill(result.status?result:{json:result});
@@ -431,4 +440,35 @@ test('Sales Audit chat carries the Electronics ledger through variants, preview,
   await say('Show me the rows behind the total.');
   await page.getByRole('alert').getByText('The source cells changed',{exact:false}).waitFor();
   assert.deepEqual(errors,[]);
+});
+
+test('diagnostics separates actual reads, synthetic provider success and untested writes',async t=>{
+  const {page}=await fixture(t);
+  await page.getByText('Workbook readable',{exact:true}).waitFor();
+  await openView(page,'Settings');
+  await page.getByText('Diagnostics',{exact:true}).click();
+  await page.getByLabel('Include live Groq check').check();
+  await page.getByRole('button',{name:'Run diagnostics',exact:true}).click();
+  await page.getByText('Single-cell read · Passed',{exact:true}).waitFor();
+  await page.getByText('Groq connectivity and structured reply · Passed',{exact:true}).waitFor();
+  await page.getByText('Preview and write execution · Not tested',{exact:true}).waitFor();
+  await page.getByText('View safe report JSON',{exact:true}).click();
+  const report=JSON.parse(await page.locator('details pre').textContent());
+  const json=JSON.stringify(report);
+  assert.equal(report.build,'fa1f913');
+  for (const secret of ['January','Monthly','Revenue','A1:B5']) assert(!json.includes(secret),secret);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+});
+
+test('column median uses selected workbook values, exposes cells and never calls AI or writes',async t=>{
+  const {page}=await fixture(t);
+  let requests=0;
+  page.on('request',request=>{if (request.url().endsWith('/api/agent')) requests++;});
+  await page.getByRole('textbox',{name:'Workbook question'}).fill('Calculate the median of Revenue in the selection');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByText('median of Revenue · 20.',{exact:false}).waitFor();
+  await page.getByText('Monthly!B2 = 12',{exact:false}).waitFor();
+  await page.getByText('Monthly!B5 = 26',{exact:false}).waitFor();
+  assert.equal(requests,0);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
 });

@@ -96,6 +96,45 @@ class ServerTests(unittest.TestCase):
             request.do_POST()
             self.assertEqual(request.response[0], 401)
 
+    def test_diagnostics_endpoint_authentication_and_probe_cache(self):
+        path = "/api/diagnostics"
+        headers = {"Authorization": "Basic c2hlZXRndWFyZDp0ZXN0"}
+        settings = {"SHEETGUARD_MODE": "production", "SHEETGUARD_ACCESS_PASSWORD": "test",
+                    "AI_PROVIDER": "groq", "GROQ_API_KEY": "dummy-secret"}
+        with patch.dict(os.environ, settings, clear=True), patch.object(server, "DIAGNOSTIC_CACHE", None):
+            request = CaptureHandler(path=path)
+            request.do_GET()
+            self.assertEqual(request.response[0], 401)
+            request = CaptureHandler(path=path, **headers)
+            request.do_GET()
+            self.assertEqual(request.response, (200, {"provider": "groq", "configured": True}))
+            expected = {"status": "passed", "category": "structured_greeting"}
+            greeting = {"tool": "none", "intent": "none", "finding": -1, "reply": "Hello"}
+            with patch.object(server, "groq_reason", return_value=greeting) as reason:
+                for body, extra, status in [
+                    (b"{}", {}, 401),
+                    (b"{}", dict(headers, **{"Sec-Fetch-Site": "cross-site"}), 403),
+                    (b'{"workbook":"private"}', headers, 400),
+                    (b"[]", headers, 400),
+                    (b"{}", headers, 200),
+                    (b"{}", headers, 200),
+                ]:
+                    request = CaptureHandler(body, path=path, **extra)
+                    request.do_POST()
+                    self.assertEqual(request.response[0], status)
+                self.assertEqual(request.response, (200, expected))
+                reason.assert_called_once_with({"question": "Reply with a short greeting. Use no workbook tools."},
+                                               "dummy-secret")
+
+    def test_diagnostics_provider_failure_is_sanitized(self):
+        from urllib.error import HTTPError
+
+        upstream = HTTPError("https://api.groq.com/", 429, "private detail", {}, io.BytesIO(b"private content"))
+        with patch.object(server, "provider_config", return_value=("groq", "dummy-secret")), \
+                patch.object(server, "groq_reason", side_effect=upstream):
+            self.assertEqual(server.probe_groq(),
+                             {"status": "failed", "category": "provider_rate_limit", "upstreamStatus": 429})
+
     def test_manifest_xml_and_production_rewrite(self):
         source = "https://sheetguard-ai.onrender.com"
         self.assertEqual(manifest.check(manifest.TEMPLATE),source)

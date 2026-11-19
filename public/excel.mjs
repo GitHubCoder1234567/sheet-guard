@@ -1,7 +1,58 @@
 import {a1, rect, validate, chartData, chartTypes, pivotPreview, headingStyle, correction, formula, trimText, additiveMeasure, LIMIT, DATASET_CELL_LIMIT, DATASET_ROW_LIMIT} from './engine.mjs';
 
 const properties = 'rowIndex,columnIndex,rowCount,columnCount,values,formulas,formulasR1C1,numberFormat,valueTypes,text';
-export const supported = version => Office.context.requirements.isSetSupported('ExcelApi',version);
+export const supported=version=>typeof Office!=='undefined' &&
+  Office.context?.requirements?.isSetSupported('ExcelApi',version)===true;
+
+const hostErrors={
+  ItemNotFound:['missing_target','The worksheet, table, or range is no longer available. Refresh the workbook and select it again.'],
+  InvalidReference:['invalid_reference','Excel could not resolve the requested workbook reference.'],
+  InvalidArgument:['invalid_range','Excel rejected the range or the supplied arguments. Select a contiguous range and try again.'],
+  InvalidObjectPath:['stale_target','The workbook target changed. Open it again and retry.'],
+  AccessDenied:['protected_target','Excel denied access to the range. Check workbook and worksheet protection.'],
+  UnsupportedOperation:['unsupported','This Excel host does not support the operation on the selected range.'],
+  ApiNotFound:['unsupported','This Excel host does not expose the required operation.'],
+  RequestPayloadSizeLimitExceeded:['payload_limit','Excel returned too much data in one request. Choose a smaller range.'],
+  ResponsePayloadSizeLimitExceeded:['payload_limit','Excel returned too much data in one request. Choose a smaller range.'],
+};
+export class WorkbookError extends Error {
+  constructor(category,operation,message) {
+    super(message);this.name='WorkbookError';this.category=category;this.operation=operation;
+  }
+}
+export function workbookFailure(error,operation) {
+  if (error instanceof WorkbookError || error?.name==='AbortError') return error;
+  const known=Object.hasOwn(hostErrors,error?.code)?hostErrors[error.code]:null;
+  if (known) return new WorkbookError(known[0],operation,known[1]);
+  if (error?.code) return new WorkbookError('excel_sync',operation,'Excel could not complete '+operation+'. Reopen the workbook or retry with a smaller range.');
+  return error;
+}
+async function workbookRun(operation,callback,context) {
+  if (typeof Excel==='undefined' || typeof Excel.run!=='function')
+    throw new WorkbookError('host_unavailable',operation,'Open Forma in a supported Excel workbook.');
+  try {return context?await Excel.run(context,callback):await Excel.run(callback);}
+  catch(error) {throw workbookFailure(error,operation);}
+}
+
+async function worksheetList(ctx) {
+  const sheets=ctx.workbook.worksheets;
+  sheets.load('items/id,items/name,items/visibility');
+  await ctx.sync();
+  return sheets.items;
+}
+async function resolveWorksheet(ctx,id) {
+  if (typeof id!=='string' || !id.trim()) throw new WorkbookError('invalid_reference','resolve worksheet','Choose a worksheet first.');
+  const sheets=ctx.workbook.worksheets;
+  // Prefer a null-object lookup to distinguish deleted IDs from sync failures.
+  if (typeof sheets.getItemOrNullObject!=='function') return sheets.getItem(id);
+  const sheet=sheets.getItemOrNullObject(id);
+  sheet.load('id,visibility');
+  await ctx.sync();
+  if (sheet.isNullObject) throw new WorkbookError('missing_target','resolve worksheet','The worksheet no longer exists. Select its replacement and retry.');
+  if (sheet.id!==id) throw new WorkbookError('stale_target','resolve worksheet','The worksheet identity changed. Select it again.');
+  if (sheet.visibility!=='Visible') throw new WorkbookError('hidden_target','resolve worksheet','The source worksheet is hidden.');
+  return sheet;
+}
 const equal = (a,b) => JSON.stringify(a) === JSON.stringify(b);
 const read = (range,sheet,extra={}) => ({
   id:sheet.id, name:sheet.name, row:range.rowIndex, column:range.columnIndex,
@@ -14,20 +65,16 @@ const content = s => [s.formulas.map((row,r) => row.map((value,c) =>
 const checkCancel = signal => { if (signal?.aborted) throw new DOMException('Scan cancelled.', 'AbortError'); };
 
 export async function scan(signal,onProgress,sheetIds,explicit=false) {
-  const sheets = await Excel.run(async ctx => {
-    const collection = ctx.workbook.worksheets;
-    collection.load('items/id,items/name,items/visibility');
-    await ctx.sync();
-    return collection.items.map(s=>({id:s.id,name:s.name,visibility:s.visibility}));
-  });
+  const sheets=await workbookRun('enumerate worksheets',async ctx=>(await worksheetList(ctx))
+    .map(s=>({id:s.id,name:s.name,visibility:s.visibility})));
   const visible=sheets.filter(s=>s.visibility==='Visible');
   const eligible=explicit&&sheetIds?visible:visible.slice(0,12);
   const targets=sheetIds?eligible.filter(s=>sheetIds.has(s.id)):eligible;
   const snapshots = [];
   for (const {id} of targets) {
     checkCancel(signal);
-    const snapshot = await Excel.run(async ctx => {
-      const sheet = ctx.workbook.worksheets.getItem(id);
+    const snapshot=await workbookRun('read workbook sample',async ctx=>{
+      const sheet=await resolveWorksheet(ctx,id);
       sheet.load('id,name');
       const used = sheet.getUsedRangeOrNullObject(true);
       used.load('rowIndex,columnIndex,rowCount,columnCount');
@@ -54,7 +101,7 @@ export async function scan(signal,onProgress,sheetIds,explicit=false) {
 
 export async function watchSheets(onChange) {
   if (!supported('1.7')) throw Error('Workbook monitoring requires ExcelApi 1.7.');
-  return Excel.run(async ctx=>{
+  return workbookRun('register workbook monitoring',async ctx=>{
     const list=ctx.workbook.worksheets;
     list.load('items/id,items/visibility');
     await ctx.sync();
@@ -63,16 +110,16 @@ export async function watchSheets(onChange) {
       return s.onChanged.add(event=>onChange(id,event.address));
     });
     await ctx.sync();
-    return async () => Excel.run(ctx,async current=>{
+    return async()=>workbookRun('remove workbook monitoring',async current=>{
       registrations.forEach(registration=>registration.remove());
       await current.sync();
-    });
+    },ctx);
   });
 }
 
 export async function selection() {
-  return Excel.run(async ctx => {
-    const range = ctx.workbook.getSelectedRange();
+  return workbookRun('read selection',async ctx=>{
+    const range=ctx.workbook.getSelectedRange();
     const sheet = range.worksheet;
     sheet.load('id,name,visibility');
     range.load('rowIndex,columnIndex,rowCount,columnCount');
@@ -86,7 +133,7 @@ export async function selection() {
 }
 
 async function loadSource(ctx,action) {
-  const sheet = ctx.workbook.worksheets.getItem(action.sheetId);
+  const sheet=await resolveWorksheet(ctx,action.sheetId);
   const range = sheet.getRange(action.address);
   sheet.load('id,name,visibility');
   range.load(properties);
@@ -97,7 +144,7 @@ async function loadSource(ctx,action) {
 
 export async function inspectRange(sheetId,address) {
   rect(address);
-  return Excel.run(async ctx => {
+  return workbookRun('inspect range',async ctx=>{
     const {sheet,range,snapshot}=await loadSource(ctx,{sheetId,address});
     // Excel's native selection is a view change and leaves cell formatting alone.
     if (typeof sheet.activate !== 'function' || typeof range.select !== 'function')
@@ -186,7 +233,7 @@ async function checkLabel(ctx,range,snapshot,expected) {
 
 export async function preview(action) {
   validate(action);
-  return Excel.run(async ctx => {
+  return workbookRun('preview workbook change',async ctx=>{
     const {snapshot,sheet,range} = await loadSource(ctx,action);
     const visual = ['chart','dashboard'].includes(action.kind);
     if (visual && !supported('1.10')) throw Error('Charts require ExcelApi 1.10.');
@@ -422,7 +469,7 @@ async function createPivot(ctx,range,snapshot,action) {
 export async function apply(p) {
   const {action} = p;
   validate(action);
-  return Excel.run(async ctx => {
+  return workbookRun('apply workbook change',async ctx=>{
     const {sheet,range,snapshot} = await loadSource(ctx,action);
     if (!equal(sourceState(snapshot),sourceState(p.snapshot))) throw Error('Source changed. Preview the operation again.');
     if (action.kind==='pivot') return createPivot(ctx,range,snapshot,action);
@@ -536,7 +583,7 @@ export async function apply(p) {
 
 export async function rollback(recovery) {
   const {action,before,after} = recovery;
-  return Excel.run(async ctx => {
+  return workbookRun('undo workbook change',async ctx=>{
     const {sheet,range,snapshot} = await loadSource(ctx,action);
     await writable(ctx,sheet,range,true);
     if (!equal(sourceState(snapshot),sourceState(after))) throw Error('The range changed after applying the operation. Undo was skipped.');
@@ -565,61 +612,124 @@ export async function rollback(recovery) {
   });
 }
 
+function targetMode(target) {
+  if (!target) return 'selection';
+  const modes=['address','used','table','namedRange'].filter(key=>target[key]);
+  if (modes.length!==1 || typeof target.sheetId!=='string' || !target.sheetId)
+    throw new WorkbookError('invalid_reference','read dataset','Specify exactly one worksheet range, table, or named range.');
+  const mode=modes[0];
+  if (mode==='address') rect(target.address,DATASET_CELL_LIMIT);
+  if (['table','namedRange'].includes(mode) && (typeof target[mode]!=='string' || target[mode].length>255))
+    throw new WorkbookError('invalid_reference','read dataset','Choose a valid workbook object name.');
+  return mode;
+}
+
+async function tableSource(ctx,sheet,table) {
+  table.load('name,showHeaders,showTotals');
+  await ctx.sync();
+  if (table.isNullObject) throw new WorkbookError('missing_target','resolve table','The selected Excel table no longer exists.');
+  if (!table.showHeaders) throw new WorkbookError('missing_headers','resolve table','Show the Excel table header row before analysing this table.');
+  const whole=table.getRange();
+  whole.load('rowIndex,columnIndex,rowCount,columnCount');await ctx.sync();
+  const rows=whole.rowCount-(table.showTotals?1:0);
+  if (rows<2) throw new WorkbookError('empty_dataset','resolve table','The Excel table contains no data rows.');
+  return {range:sheet.getRange(a1(whole.rowIndex,whole.columnIndex,rows,whole.columnCount)),table:table.name};
+}
+
+async function datasetTarget(ctx,target,mode) {
+  if (mode==='selection') {
+    const range=ctx.workbook.getSelectedRange();
+    return {range,sheet:range.worksheet};
+  }
+  const sheet=await resolveWorksheet(ctx,target.sheetId);
+  if (mode==='used') return {sheet,range:sheet.getUsedRangeOrNullObject(true)};
+  if (mode==='address') return {sheet,range:sheet.getRange(target.address)};
+  if (mode==='table') {
+    if (!sheet.tables?.getItemOrNullObject) throw new WorkbookError('unsupported','resolve table','This host cannot resolve Excel table names.');
+    return {sheet,...await tableSource(ctx,sheet,sheet.tables.getItemOrNullObject(target.table))};
+  }
+  const names=ctx.workbook.names;
+  if (!supported('1.4') || !names?.getItemOrNullObject)
+    throw new WorkbookError('unsupported','resolve named range','This host cannot resolve workbook-scoped named ranges.');
+  const name=names.getItemOrNullObject(target.namedRange);
+  name.load('type');await ctx.sync();
+  if (name.isNullObject || name.type!=='Range')
+    throw new WorkbookError('invalid_reference','resolve named range','Choose a workbook-scoped name that refers to a range.');
+  if (typeof name.getRangeOrNullObject!=='function')
+    throw new WorkbookError('unsupported','resolve named range','This host cannot open a named range.');
+  const range=name.getRangeOrNullObject();
+  await ctx.sync();
+  if (range.isNullObject)
+    throw new WorkbookError('invalid_reference','resolve named range','The named range no longer refers to available cells.');
+  const owner=range.worksheet;
+  owner.load('id');await ctx.sync();
+  if (owner.id!==target.sheetId)
+    throw new WorkbookError('invalid_reference','resolve named range','The named range is unavailable on the specified worksheet.');
+  return {sheet,range};
+}
+
 // Long selections are loaded in bounded blocks. No cells are changed.
 export async function readDataset(signal,onProgress,target,expand=false,evidence=false) {
-  return Excel.run(async ctx=>{
-    if (target?.address) rect(target.address,DATASET_CELL_LIMIT);
-    const worksheet=target?ctx.workbook.worksheets.getItem(target.sheetId):null;
-    let range=target?.used?worksheet.getUsedRangeOrNullObject(true):
-      worksheet?worksheet.getRange(target.address):ctx.workbook.getSelectedRange();
-    const sheet=worksheet??range.worksheet;
+  return workbookRun('read dataset',async ctx=>{
+    const mode=targetMode(target);
+    let {range,sheet,table}=await datasetTarget(ctx,target,mode);
     const dimensions='rowIndex,columnIndex,rowCount,columnCount';
     range.load(dimensions);sheet.load('id,name,visibility');
     await ctx.sync();
-    if (range.isNullObject) throw Error('This worksheet has no populated data range.');
-    if (expand && range.rowCount===1 && range.columnCount===1 && supported('1.7') &&
-        typeof range.getSurroundingRegion==='function') {
-      range=range.getSurroundingRegion();range.load(dimensions);await ctx.sync();
+    if (range.isNullObject) throw new WorkbookError('empty_dataset','read dataset','This worksheet has no populated data range.');
+    if (expand && range.rowCount===1 && range.columnCount===1) {
+      if (supported('1.9') && typeof range.getTables==='function') {
+        const tables=range.getTables(false);tables.load('items/name');await ctx.sync();
+        if (tables.items.length===1) ({range,table}=await tableSource(ctx,sheet,tables.items[0]));
+      }
+      if (!table && supported('1.7') && typeof range.getSurroundingRegion==='function') range=range.getSurroundingRegion();
+      range.load(dimensions);await ctx.sync();
     }
     const {rowIndex:r,columnIndex:c,rowCount:rows,columnCount:columns}=range;
     if (sheet.visibility!=='Visible') throw Error('Select a range on a visible worksheet.');
-    if (rows<2 || columns<1 || rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
-      throw Error('Select a header and data within 50,000 rows and 160,000 cells.');
-    const values=[],errors=[],display=[],formats=[];
+    if (rows<2 || columns<1)
+      throw new WorkbookError('empty_dataset','read dataset','Select a header and at least one data row.');
+    if (rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
+      throw new WorkbookError('payload_limit','read dataset','Select a header and data within 50,000 rows and 160,000 cells.');
+    const values=[],errors=[],display=[],formats=[],types=[];
     const blockSize=Math.max(1,Math.min(2000,Math.floor(8000/columns)));
     let textSize=0;
     for (let offset=0;offset<rows;offset+=blockSize) {
       checkCancel(signal);
       const block=sheet.getRange(a1(r+offset,c,Math.min(blockSize,rows-offset),columns));
       block.load(evidence?'values,valueTypes,text,numberFormat':'values,valueTypes');await ctx.sync();
+      const expected=Math.min(blockSize,rows-offset);
+      if (block.values.length!==expected || block.valueTypes.length!==expected ||
+          block.values.some((row,i)=>row.length!==columns||block.valueTypes[i]?.length!==columns))
+        throw new WorkbookError('partial_read','read dataset','Excel returned incomplete rows. Try again with a smaller range.');
       for (let i=0;i<block.values.length;i++) {
         const row=block.values[i];
         textSize+=row.reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
         if (evidence) {
           const text=block.text?.[i]??[],format=block.numberFormat?.[i]??[];
-          display.push(text);formats.push(format);
+          display.push(text);formats.push(format);types.push(block.valueTypes[i]);
           textSize+=text.concat(format).reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
         }
-        if (textSize>4000000) throw Error('This selection contains too much text. Choose fewer columns or rows.');
+        if (textSize>4000000) throw new WorkbookError('payload_limit','read dataset','This selection contains too much text. Choose fewer columns or rows.');
         values.push(row);
         errors.push(block.valueTypes[i].flatMap((v,j)=>v==='Error'?[j]:[]));
       }
       onProgress?.(values.length,rows);
     }
     checkCancel(signal);
-    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),values,errors,...(evidence?{display,formats}:{})};
+    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),table:table??null,values,errors,...(evidence?{display,formats,types}:{})};
   });
 }
 
 
 export async function readContext(target) {
   rect(target.address);
-  return Excel.run(async ctx=>(await loadSource(ctx,target)).snapshot);
+  return workbookRun('read source range',async ctx=>(await loadSource(ctx,target)).snapshot);
 }
 
 
 export async function selectionAnchor() {
-  return Excel.run(async ctx=>{
+  return workbookRun('read selection address',async ctx=>{
     const range=ctx.workbook.getSelectedRange(),sheet=range.worksheet;
     range.load('rowIndex,columnIndex,rowCount,columnCount');sheet.load('id,name,visibility');
     await ctx.sync();
@@ -630,7 +740,7 @@ export async function selectionAnchor() {
 }
 
 export async function activeWorksheet() {
-  return Excel.run(async ctx=>{
+  return workbookRun('identify active worksheet',async ctx=>{
     const sheet=ctx.workbook.worksheets.getActiveWorksheet();
     sheet.load('id,name');
     await ctx.sync();
@@ -641,8 +751,8 @@ export async function activeWorksheet() {
 
 export async function selectEvidenceRange(sheetId,address) {
   rect(address,DATASET_CELL_LIMIT);
-  return Excel.run(async ctx=>{
-    const sheet=ctx.workbook.worksheets.getItem(sheetId);
+  return workbookRun('navigate to source',async ctx=>{
+    const sheet=await resolveWorksheet(ctx,sheetId);
     sheet.load('visibility');
     await ctx.sync();
     if (sheet.visibility!=='Visible') throw Error('This source worksheet is hidden.');
@@ -655,13 +765,51 @@ export async function selectEvidenceRange(sheetId,address) {
 
 
 export async function visibleWorksheetByName(name) {
-  return Excel.run(async ctx=>{
-    const collection=ctx.workbook.worksheets;
-    collection.load('items/id,items/name,items/visibility');
-    await ctx.sync();
-    const sheet=collection.items.find(s=>s.name.toLowerCase()===name.toLowerCase());
+  return workbookRun('resolve visible worksheet',async ctx=>{
+    const sheets=await worksheetList(ctx);
+    const sheet=sheets.find(s=>s.name.toLowerCase()===name.toLowerCase());
     if (!sheet || sheet.visibility!=='Visible')
       throw Error('Forma could not find a visible worksheet named “'+name+'”. Check the sheet name and try again.');
     return {id:sheet.id,name:sheet.name};
+  });
+}
+
+export async function inspectWorkbookStructure() {
+  return workbookRun('discover workbook structure',async ctx=>{
+    const sheets=await worksheetList(ctx);
+    const active=ctx.workbook.worksheets.getActiveWorksheet();
+    active.load('id,name');await ctx.sync();
+    return {active:{id:active.id,name:active.name},sheets:sheets.map(s=>({id:s.id,name:s.name,visibility:s.visibility}))};
+  });
+}
+
+// A bounded read of object metadata for the active sheet, never worksheet data.
+export async function inspectActiveObjects() {
+  return workbookRun('discover active worksheet objects',async ctx=>{
+    const sheet=ctx.workbook.worksheets.getActiveWorksheet();
+    const range=sheet.getUsedRangeOrNullObject(true), tables=sheet.tables, charts=sheet.charts, names=ctx.workbook.names;
+    range.load('rowIndex,columnIndex,rowCount,columnCount');
+    tables?.load('items/name');charts?.load('items/name');
+    if (supported('1.4')) names?.load('items/name,items/type');
+    sheet.protection?.load('protected');
+    const pivots=supported('1.8')?sheet.pivotTables:null;
+    pivots?.load('items/name');
+    await ctx.sync();
+    const overview={used:range.isNullObject?null:{rows:range.rowCount,columns:range.columnCount,
+      address:a1(range.rowIndex,range.columnIndex,range.rowCount,range.columnCount)},
+      protected:sheet.protection?.protected??null,tableCount:tables?.items.length??null,
+      chartCount:charts?.items.length??null,pivotCount:pivots?.items.length??null,
+      workbookNameCount:supported('1.4')?names?.items.length??null:null,
+      dataNames:supported('1.4')?names?.items.filter(x=>x.type==='Range').slice(0,24).map(x=>x.name)??[]:[],
+      tables:[]};
+    for (const table of tables?.items.slice(0,24)??[]) {
+      const r=table.getRange();
+      r.load('rowIndex,columnIndex,rowCount,columnCount');
+      overview.tables.push({name:table.name,range:r});
+    }
+    if (overview.tables.length) await ctx.sync();
+    overview.tables=overview.tables.map(({name,range:r})=>({name,
+      address:a1(r.rowIndex,r.columnIndex,r.rowCount,r.columnCount),rows:r.rowCount,columns:r.columnCount}));
+    return overview;
   });
 }

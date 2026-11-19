@@ -57,3 +57,5 @@ header p{font-size:11px;margin:4px 0 0}
 .ranking-table th,.ranking-table td{border-bottom:1px solid var(--line);padding:6px;overflow-wrap:anywhere}
 .ranking-table th:nth-child(n+3),.ranking-table td:nth-child(n+3){text-align:right;font-variant-numeric:tabular-nums}
 .ranking-table td button{border:0;background:none;color:var(--green);padding:0;text-align:left;min-height:24px;text-decoration:underline;overflow-wrap:anywhere}
+.diagnostic-list{padding-left:16px;display:grid;gap:8px}
+.diagnostic-list code{font-size:11px}

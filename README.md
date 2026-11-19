@@ -48,3 +48,9 @@ Ask **Which product category has the highest sales?**, then ask **Where did the 
 On supported Excel hosts, **Fix the inconsistent category labels** can prepare a single literal-cell normalization from the latest verified report. Review the preview and approve it explicitly. The verified edit can be reversed in History. Calculations include rows inside the requested range regardless of filters or hiding.
 
 The fixture is `tests/fixtures/sales-audit.json`. Include `tests/evidence.test.mjs` in the Node test command. See [architecture audit](docs/forma-4-audit.md) and [the release and deployment notes](docs/forma-4-release.md).
+
+### Reliability validation
+
+Use **Settings → Diagnostics** to verify workbook access and export a safe report. The optional live Groq check sends a synthetic greeting through the server. Diagnostics omit workbook names, ranges, cell contents and passwords. The `/health` response includes the hosted build identifier when Render supplies it.
+
+Run `sh tools/verify.sh` with Node, Python 3, OpenSSL and Playwright. Set `CHROMIUM_EXECUTABLE` if using an existing Chromium installation. Run `node tools/benchmark.mjs` for the in-memory synthetic benchmark. See the [architecture audit](docs/reliability-audit.md), [release evidence and known limits](docs/reliability-foundation-release.md), and [Excel host verification and rollback procedure](docs/real-excel-validation.md).

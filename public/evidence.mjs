@@ -1,4 +1,5 @@
-import {a1, datasetColumns, rect, summariseBy, DATASET_CELL_LIMIT} from './engine.mjs';
+import {a1, datasetColumns, summariseBy} from './engine.mjs';
+import {cellRecord, explicitCurrencyCodes, rangeShape} from './workbook-data.mjs';
 
 export const foldLabel=value=>value.trim().replace(/\s+/gu,' ').toLowerCase();
 const numeric=value=>typeof value==='number' && Number.isFinite(value);
@@ -7,11 +8,7 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
   const headers=datasetColumns(dataset.values);
   const groupColumn=headers.indexOf(fields.dimension), measureColumn=headers.indexOf(fields.measure);
   if (groupColumn<0 || measureColumn<0 || groupColumn===measureColumn) throw Error('Choose distinct, existing category and measure columns.');
-  const bounds=rect(dataset.address,DATASET_CELL_LIMIT);
-  if (dataset.values.length!==bounds.rows || dataset.values.some(row=>row.length!==bounds.columns) ||
-      dataset.errors && (dataset.errors.length!==bounds.rows || dataset.errors.some(row=>!Array.isArray(row) ||
-        row.some(i=>!Number.isInteger(i)||i<0||i>=bounds.columns))))
-    throw Error('The workbook snapshot does not match the declared source range.');
+  const bounds=rangeShape(dataset);
   const ids=headers.flatMap((h,i)=>/^(?:order|transaction|record)[ _-]*id$/i.test(h)?[i]:[]);
   const idColumn=ids.length===1?ids[0]:-1;
   const records=[],excluded=[],ledger=new Map(), variants=new Map(), knownIds=new Map();
@@ -20,12 +17,12 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
   for (let i=1;i<bounds.rows;i++) {
     const row=dataset.values[i],errors=dataset.errors?.[i]??[];
     if (row.every(v=>v===''||v===null)) {empty++;continue;}
-    const label=row[groupColumn], value=row[measureColumn];
+    const label=row[groupColumn], measure=cellRecord(dataset,bounds,i,measureColumn), value=measure.raw;
     const id=idColumn>=0&&!errors.includes(idColumn)?row[idColumn]:null;
     const record={id:dataset.sheetId+'!'+cell(i,groupColumn),sourceRow:bounds.r+i+1,
       label,value,groupCell:cell(i,groupColumn),measureCell:cell(i,measureColumn),
       identifier:id===null||id===''?null:id,identifierCell:idColumn>=0?cell(i,idColumn):null,
-      displayed:dataset.display?.[i]?.[measureColumn]??null,format:dataset.formats?.[i]?.[measureColumn]??null};
+      displayed:measure.displayed,format:measure.format};
     if (id!==null&&id!=='') {
       if (knownIds.has(id)) repeatedIdRows++;
       knownIds.set(id,true);
@@ -47,6 +44,9 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
       names.get(label).push(record);
     }
   }
+  const currencyCodes=explicitCurrencyCodes(records.map(r=>r.format));
+  if (currencyCodes.length>1)
+    throw Error('The measure has more than one currency format. Select a single-currency range or a converted column.');
   // Reuse the existing deterministic summation on just the eligible ledger rows.
   const summary=summariseBy({values:[['Group','Amount'],...records.map(r=>[
     normalised&&typeof r.label==='string'?foldLabel(r.label):r.label,r.value,
@@ -54,7 +54,7 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
   if (summary.groups.reduce((n,g)=>n+g.records,0)!==records.length) throw Error('Category totals did not reconcile with their source rows.');
   const groups=summary.groups.map(g=>({label:g.label,sum:g.sum,records:ledger.get(g.label)}));
   const columnRange=c=>a1(bounds.r+1,bounds.c+c,bounds.rows-1,1);
-  const source={sheetId:dataset.sheetId,sheet:dataset.sheet,address:dataset.address,table:null,
+  const source={sheetId:dataset.sheetId,sheet:dataset.sheet,address:dataset.address,table:dataset.table??null,
     groupRange:columnRange(groupColumn),measureRange:columnRange(measureColumn),idRange:idColumn<0?null:columnRange(idColumn)};
   const reasons=Object.create(null);
   for (const item of excluded) reasons[item.reason]=(reasons[item.reason]??0)+1;
