@@ -545,11 +545,18 @@ export async function rollback(recovery) {
 }
 
 // Long selections are loaded in bounded blocks. No cells are changed.
-export async function readDataset(signal,onProgress) {
+export async function readDataset(signal,onProgress,target,expand=false) {
   return Excel.run(async ctx=>{
-    const range=ctx.workbook.getSelectedRange(), sheet=range.worksheet;
-    range.load('rowIndex,columnIndex,rowCount,columnCount');sheet.load('id,name,visibility');
+    if (target) rect(target.address,DATASET_CELL_LIMIT);
+    let range=target?ctx.workbook.worksheets.getItem(target.sheetId).getRange(target.address):ctx.workbook.getSelectedRange();
+    const sheet=range.worksheet;
+    const dimensions='rowIndex,columnIndex,rowCount,columnCount';
+    range.load(dimensions);sheet.load('id,name,visibility');
     await ctx.sync();
+    if (expand && range.rowCount===1 && range.columnCount===1 && supported('1.7') &&
+        typeof range.getSurroundingRegion==='function') {
+      range=range.getSurroundingRegion();range.load(dimensions);await ctx.sync();
+    }
     const {rowIndex:r,columnIndex:c,rowCount:rows,columnCount:columns}=range;
     if (sheet.visibility!=='Visible') throw Error('Select a range on a visible worksheet.');
     if (rows<2 || columns<1 || rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
@@ -572,5 +579,23 @@ export async function readDataset(signal,onProgress) {
     }
     checkCancel(signal);
     return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),values,errors};
+  });
+}
+
+
+export async function readContext(target) {
+  rect(target.address);
+  return Excel.run(async ctx=>(await loadSource(ctx,target)).snapshot);
+}
+
+
+export async function selectionAnchor() {
+  return Excel.run(async ctx=>{
+    const range=ctx.workbook.getSelectedRange(),sheet=range.worksheet;
+    range.load('rowIndex,columnIndex,rowCount,columnCount');sheet.load('id,name,visibility');
+    await ctx.sync();
+    if (sheet.visibility!=='Visible') throw Error('Select cells on a visible worksheet.');
+    return {id:sheet.id,name:sheet.name,address:a1(range.rowIndex,range.columnIndex,range.rowCount,range.columnCount),
+      rows:range.rowCount,columns:range.columnCount};
   });
 }

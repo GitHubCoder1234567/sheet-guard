@@ -1,6 +1,7 @@
 import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
-import {readDataset, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
+import {readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
+import {executeTool} from './agent.mjs';
 
 const nav = document.querySelector('#nav'), main = document.querySelector('#main');
 const notice = document.querySelector('#notice'), connection = document.querySelector('#connection');
@@ -588,13 +589,13 @@ function chatView() {
     }
   }
 }
-async function captureDataset() {
+async function captureDataset(target,expand=false) {
   state.datasetController=new AbortController();
   render();
   try {
     return await readDataset(state.datasetController.signal,(read,total)=>{
       notice.textContent='Read '+read.toLocaleString()+' of '+total.toLocaleString()+' rows.';
-    });
+    },target,expand);
   } finally {state.datasetController=null;}
 }
 function comparisonPanel() {
@@ -683,40 +684,77 @@ async function answerLocal(question) {
   }
   state.messages.push({role:'assistant',text:reply});return '';
 }
+async function requestAgent(payload) {
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),22000);
+  const headers={'Content-Type':'application/json'};
+  if (state.accessPassword) {
+    const bytes=new TextEncoder().encode('sheetguard:'+state.accessPassword);
+    headers.Authorization='Basic '+btoa(String.fromCharCode(...bytes));
+  }
+  try {
+    const response=await fetch('/api/agent',{method:'POST',headers,body:JSON.stringify(payload),signal:controller.signal});
+    const data=await response.json();
+    if (!response.ok) throw Error(data.error || 'AI request failed.');
+    return data;
+  } finally {clearTimeout(timeout);}
+}
+
 async function ask(question) {
   const conversation=state.messages.slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
   state.messages.push({role:'user',text:question});state.draft='';render();
   try {
-    let s;
-    try {s=await selection();} catch { /* A question can be answered without a contiguous selection. */ }
+    let anchor,s;
+    try {
+      anchor=await selectionAnchor();
+      if (anchor.rows*anchor.columns<=2400) s=await readContext({sheetId:anchor.id,address:anchor.address});
+      if (s) s={...s,address:anchor.address};
+    } catch { /* Workbook metadata remains usable without a selection. */ }
     const findings=state.findings.filter(f=>!state.dismissed.has(f.id)).slice(0,12);
     const shorten=x=>typeof x==='string'?x.slice(0,120):x;
     const context=s?{sheet:s.name,range:s.address,totalRows:s.values.length,totalColumns:s.values[0].length,
       values:s.values.slice(0,12).map(r=>r.slice(0,8).map(shorten)),
-      formulas:s.formulas.slice(0,12).map(r=>r.slice(0,8).map(x=>typeof x==='string'&&x.startsWith('=')?shorten(x):null))}:undefined;
+      formulas:s.formulas.slice(0,12).map(r=>r.slice(0,8).map(x=>typeof x==='string'&&x.startsWith('=')?shorten(x):null))}:
+      anchor?{sheet:anchor.name,range:anchor.address,totalRows:anchor.rows,totalColumns:anchor.columns}:undefined;
     const workbook=state.snapshots.slice(0,4).map(sheet=>{
       const summary=profile(sheet);
       return {sheet:shorten(sheet.name),sampled:sheet.partial, purpose:summary.purpose,
         columns:summary.columns.slice(0,6).map(({label,type,formulas,errors})=>({label:shorten(label),type,formulas,errors}))};
     });
-    const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),28000);
-    let result;
-    try {
-      const headers={'Content-Type':'application/json'};
-      if (state.accessPassword) {
-        const bytes=new TextEncoder().encode('sheetguard:'+state.accessPassword);
-        headers.Authorization='Basic '+btoa(String.fromCharCode(...bytes));
+    const payload={question,selection:context,workbook,findings:findings.map(f=>({title:f.title,detail:f.detail.slice(0,240),
+      target:findingAddress(f),actionable:!!f.action&&available(f.action)})),conversation};
+    let result=await requestAgent(payload);
+    let routedProposal;
+    if (result.tool && result.tool!=='none') {
+      const outcome=await executeTool(result,{sheets:state.sheets,snapshots:state.snapshots,
+        selection:anchor?{...s,...anchor}:null,readRange:readContext,
+        readDataset:target=>{
+          if (!target&&!anchor) throw Error('Select the dataset, including its header.');
+          return captureDataset(target??{sheetId:anchor.id,address:anchor.address},true);
+        }});
+      if (outcome.local) {
+        state.messages.push({role:'assistant',text:outcome.local});
+        return '';
       }
-      const response=await fetch('/api/agent',{method:'POST',headers,
-        body:JSON.stringify({question,selection:context,workbook,findings:findings.map(f=>({title:f.title,detail:f.detail.slice(0,240),
-          target:findingAddress(f),actionable:!!f.action&&available(f.action)})),conversation}),signal:controller.signal});
-      const data=await response.json();
-      if (!response.ok) throw Error(data.error || 'AI request failed.');
-      result=data;
-    } finally {clearTimeout(timeout);}
-    const message={role:'assistant',text:result.reply};
+      if (outcome.compare) {
+        state.workspaceMode='compare';state.comparison={};
+        state.messages.push({role:'assistant',text:'Capture the two ranges below and choose their matching column.'});
+        return '';
+      }
+      routedProposal=outcome.proposal;
+      if (routedProposal) {
+        if (result.address || result.sheet)
+          throw Error('Select the intended range directly in Excel before requesting a change.');
+        if (!s) throw Error('Select a smaller editable range before requesting a proposal.');
+      }
+      if (outcome.evidence) result=await requestAgent({question,toolResult:outcome.evidence,findings:payload.findings});
+    }
+    const message={role:'assistant',text:routedProposal?'Review the proposed change before applying it.':result.reply};
     state.messages.push(message);
     try {
+      if (routedProposal) {
+        message.proposal=await makeManual(s,routedProposal,result.option);
+        return '';
+      }
       if (result.intent==='audit') {
         state.workspaceMode='review';
         return await doScan();
@@ -756,7 +794,7 @@ function settingsView() {
   opt.addEventListener('change',()=>{state.consent=opt.checked;render();});
   const label=node('label',undefined,'check');label.append(opt,node('span','Allow AI data sharing for this session'));
   main.append(block(node('h3','AI and workbook data'),label,node('p',
-    'Sending a question shares your prompt, up to 12 rows by 8 columns from the selection, up to 12 audit summaries, sampled sheet and column profiles, and recent chat via your Forma host and OpenAI. Workbook scans and writes run inside Excel. Session settings and undo data clear when the pane closes.')));
+    'Sending a question shares your prompt, up to 12 rows by 8 columns from the selection, up to 12 audit summaries, sampled sheet and column profiles, and recent chat via your Forma host and configured AI provider. If the assistant needs more evidence, it can request a bounded range or formula sample. Totals, counts and duplicates are computed locally. Workbook scans and writes run inside Excel. Session settings and undo data clear when the pane closes.')));
   const access=node('input');access.type='password';access.maxLength=256;access.value=state.accessPassword;
   access.disabled=state.busy;access.autocomplete='off';
   access.addEventListener('input',()=>{state.accessPassword=access.value;});

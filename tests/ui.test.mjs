@@ -45,7 +45,7 @@ async function openView(page,name) {
   await page.getByRole('button',{name,exact:true}).click();
 }
 
-async function fixture(t, office=workbookDouble) {
+async function fixture(t, office=workbookDouble, agent=null) {
   const browser=await chromium.launch({executablePath:chromiumPath,headless:true});
   t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:360,height:760}});
@@ -54,6 +54,7 @@ async function fixture(t, office=workbookDouble) {
   page.on('pageerror',e=>errors.push(e.message));
   await page.route(origin+'/**',async route=>{
     const path=new URL(route.request().url()).pathname;
+    if (path==='/api/agent' && agent) return route.fulfill({json:agent(route.request().postDataJSON())});
     if (path==='/api/agent') return route.fulfill({json:{reply:'Monthly revenue increased from 12 to 26.',intent:'none',option:'default',finding:-1}});
     if (hostedOrigin) return route.continue();
     const file=path==='/'?'index.html':path.slice(1);
@@ -181,5 +182,24 @@ test('explicit PivotTable request produces a read-only proposal preview',async t
   await card.getByText('Native PivotTable · new worksheet',{exact:true}).waitFor();
   await card.getByRole('button',{name:'Apply changes',exact:true}).waitFor();
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+  assert.deepEqual(errors,[]);
+});
+
+
+test('AI routes a natural-language ranking through the local aggregation tool',async t=>{
+  let hits=0;
+  const {page,errors}=await fixture(t,workbookDouble,request=>{
+    hits++;
+    assert.match(request.question,/highest revenue/);
+    return {reply:'Requesting totals.',intent:'none',option:'default',finding:-1,tool:'AggregateData',
+      sheet:'',address:'',measure:'Revenue',dimension:'Month',operation:'highest'};
+  });
+  await openView(page,'Settings');
+  await page.getByRole('checkbox',{name:'Allow AI data sharing for this session'}).check();
+  await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+  await page.getByRole('textbox',{name:'Workbook question'}).fill('Which month had the highest revenue?');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByText('Highest total Revenue: April · 26',{exact:false}).waitFor();
+  assert.equal(hits,1);
   assert.deepEqual(errors,[]);
 });

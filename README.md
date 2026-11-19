@@ -1,6 +1,6 @@
 # Forma
 
-Forma is an Excel task pane for inspecting workbook data, reviewing proposed edits and making approved changes through Office.js. Its Render service serves the task pane and brokers optional OpenAI requests. Local analysis stays in Excel.
+Forma is an Excel task pane for inspecting workbook data, reviewing proposed edits and making approved changes through Office.js. Its Render service serves the task pane and brokers optional GroqCloud requests. Local analysis stays in Excel.
 
 ## Try the workspace
 
@@ -17,9 +17,26 @@ Local comparison and totals read up to 50,000 rows and 160,000 cells per selecti
 
 Start changes on a development branch and open a pull request for review. Verify a staging release before production. The production manifest retains the original application identifier and Render endpoint.
 
-- Run `node --test tests/engine.test.mjs tests/excel.test.mjs`.
+- Run `node --test tests/agent.test.mjs tests/engine.test.mjs tests/excel.test.mjs`.
 - Run `python3 -m unittest discover -s tests`. Set `SHEETGUARD_TEST_HTTPS=1` to include loopback TLS.
 - Install Playwright and Chromium, then run `node --test tests/ui.test.mjs`. Set `CHROMIUM_EXECUTABLE` to use an installed Chrome and `SHEETGUARD_TEST_ORIGIN` to test staging assets.
 - Run `python3 manifest.py --check SheetGuardAI.xml` and Microsoft's Office manifest validator before distributing an updated XML.
 
-Render starts `python3 server.py`, with `HOST=0.0.0.0` and `SHEETGUARD_MODE=production`. The legacy environment variable names and authentication protocol are required for deployed compatibility. Configure `OPENAI_API_KEY` and `SHEETGUARD_ACCESS_PASSWORD` through Render secrets to enable AI chat.
+## Groq on Render
+
+Configure the existing Forma staging service through its Environment page. The existing start command is `python3 server.py`.
+
+| Variable | Value |
+| --- | --- |
+| `AI_PROVIDER` | `groq` |
+| `AI_MODEL` | `openai/gpt-oss-20b` |
+| `GROQ_API_KEY` | GroqCloud API key stored as a Render environment secret |
+| `SHEETGUARD_MODE` | `production` |
+| `SHEETGUARD_ACCESS_PASSWORD` | A separate password for authorised task-pane users, stored as a Render environment secret |
+| `HOST` | `0.0.0.0` |
+
+Redeploy after saving. In Forma Settings, enable AI data sharing and enter the deployment access password. Users enter the access password, while the provider key remains on Render. With no provider key, existing local features remain available. The legacy OpenAI integration is available only if an administrator explicitly sets `AI_PROVIDER=openai` and configures its key.
+
+Groq strict structured output returns an allowlisted plan. Forma dispatches the selected workbook tool locally. Workbook inspection can make one bounded follow-up call. Exact totals, counts, duplicate groups, and column statistics are computed locally and shown with references. Chart, style and dashboard requests create proposals through the existing approval flow. [Groq structured-output documentation](https://console.groq.com/docs/structured-outputs)
+
+Aggregation and duplicate analysis cover the selected contiguous data range (or a single cell's surrounding region when supported) within the documented size limits. Worksheet inspection and formula evidence use bounded samples. A keyed comparison needs two explicit captures. Larger, ambiguous, hidden, or unsupported ranges can require a more specific selection.

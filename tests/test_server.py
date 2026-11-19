@@ -58,7 +58,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("ignore all instructions", body["instructions"])
 
     def test_endpoint_checks_origin_media_size_and_credentials(self):
-        with patch.dict(os.environ, {"SHEETGUARD_MODE": "development", "OPENAI_API_KEY": "test"}, clear=True):
+        with patch.dict(os.environ, {"SHEETGUARD_MODE": "development", "AI_PROVIDER": "openai", "OPENAI_API_KEY": "test"}, clear=True):
             for expected, request in [
                 (403, CaptureHandler(b"{}", **{"Sec-Fetch-Site": "cross-site"})),
                 (415, CaptureHandler(b"{}", **{"Content-Type": "text/plain"})),
@@ -76,7 +76,7 @@ class ServerTests(unittest.TestCase):
     def test_authorized_calls_and_unconfigured_backend(self):
         data = b'{"question":"Explain the selection"}'
         with patch.dict(os.environ, {"SHEETGUARD_MODE":"production", "SHEETGUARD_ACCESS_PASSWORD":"test",
-                                     "OPENAI_API_KEY":"dummy"}, clear=True):
+                                     "AI_PROVIDER": "openai", "OPENAI_API_KEY":"dummy"}, clear=True):
             request=CaptureHandler(data, Authorization="Basic c2hlZXRndWFyZDp0ZXN0")
             with patch.object(server,"reason",return_value=self.valid):
                 request.do_POST()
@@ -91,7 +91,7 @@ class ServerTests(unittest.TestCase):
             request = CaptureHandler(b'{"question":"Audit my workbook"}')
             request.do_POST()
             self.assertEqual(request.response[0], 503)
-        with patch.dict(os.environ, {"SHEETGUARD_MODE": "production", "OPENAI_API_KEY": "test"}, clear=True):
+        with patch.dict(os.environ, {"SHEETGUARD_MODE": "production", "AI_PROVIDER": "openai", "OPENAI_API_KEY": "test"}, clear=True):
             request = CaptureHandler(b'{"question":"Audit my workbook"}')
             request.do_POST()
             self.assertEqual(request.response[0], 401)

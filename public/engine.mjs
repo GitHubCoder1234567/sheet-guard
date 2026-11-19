@@ -18,13 +18,13 @@ export function a1(row, column, rows = 1, columns = 1) {
   const start = col(column) + (row + 1);
   return rows === 1 && columns === 1 ? start : start + ':' + col(column + columns - 1) + (row + rows);
 }
-export function rect(address) {
+export function rect(address,cellLimit=LIMIT) {
   const match = /^([A-Z]{1,3})([1-9]\d{0,6})(?::([A-Z]{1,3})([1-9]\d{0,6}))?$/.exec(address);
   if (!match) throw Error('Use a local A1 range, such as A1:B12.');
   const [, x, y, xx = x, yy = y] = match;
   const index = name => [...name].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0) - 1;
   const r = +y - 1, c = index(x), rows = +yy - r, columns = index(xx) - c + 1;
-  if (rows < 1 || columns < 1 || r + rows > 1048576 || c + columns > 16384 || rows * columns > LIMIT)
+  if (rows < 1 || columns < 1 || r + rows > 1048576 || c + columns > 16384 || rows * columns > cellLimit)
     throw Error('Range exceeds the supported size or Excel bounds.');
   return {r, c, rows, columns};
 }
