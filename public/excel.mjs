@@ -1,4 +1,4 @@
-import {a1, rect, validate, chartData, chartTypes, palettes, correction, formula, LIMIT} from './engine.mjs';
+import {a1, rect, validate, chartData, chartTypes, pivotPreview, headingStyle, correction, formula, trimText, additiveMeasure, LIMIT, DATASET_CELL_LIMIT, DATASET_ROW_LIMIT} from './engine.mjs';
 
 const properties = 'rowIndex,columnIndex,rowCount,columnCount,values,formulas,formulasR1C1,numberFormat,valueTypes,text';
 export const supported = version => Office.context.requirements.isSetSupported('ExcelApi',version);
@@ -13,21 +13,26 @@ const content = s => [s.formulas.map((row,r) => row.map((value,c) =>
   typeof value === 'string' && value.startsWith('=') && value !== s.values[r][c] ? value : s.values[r][c]))];
 const checkCancel = signal => { if (signal?.aborted) throw new DOMException('Scan cancelled.', 'AbortError'); };
 
-export async function scan(signal,onProgress) {
+export async function scan(signal,onProgress,sheetIds,explicit=false) {
   const sheets = await Excel.run(async ctx => {
     const collection = ctx.workbook.worksheets;
     collection.load('items/id,items/name,items/visibility');
     await ctx.sync();
-    return collection.items.filter(s => s.visibility === 'Visible').map(s => s.id);
+    return collection.items.map(s=>({id:s.id,name:s.name,visibility:s.visibility}));
   });
+  const visible=sheets.filter(s=>s.visibility==='Visible');
+  const eligible=explicit&&sheetIds?visible:visible.slice(0,12);
+  const targets=sheetIds?eligible.filter(s=>sheetIds.has(s.id)):eligible;
   const snapshots = [];
-  for (const id of sheets.slice(0,12)) {
+  for (const {id} of targets) {
     checkCancel(signal);
     const snapshot = await Excel.run(async ctx => {
       const sheet = ctx.workbook.worksheets.getItem(id);
       sheet.load('id,name');
       const used = sheet.getUsedRangeOrNullObject(true);
       used.load('rowIndex,columnIndex,rowCount,columnCount');
+      const names=sheet.names, tables=sheet.tables;
+      names?.load('items/name');tables?.load('items/name');
       const charts = sheet.charts;
       charts.load('items/name');
       await ctx.sync();
@@ -37,13 +42,32 @@ export async function scan(signal,onProgress) {
       const range = sheet.getRange(a1(used.rowIndex,used.columnIndex,rows,columns));
       range.load(properties);
       await ctx.sync();
-      return read(range,sheet,{chartCount:charts.items.length, partial:rows !== used.rowCount || columns !== used.columnCount});
+      return read(range,sheet,{chartCount:charts.items.length,names:names?.items.map(x=>x.name).slice(0,12)??[],
+        tables:tables?.items.map(x=>x.name).slice(0,12)??[],partial:rows !== used.rowCount || columns !== used.columnCount});
     });
     if (snapshot) snapshots.push(snapshot);
-    onProgress?.(snapshots.length,sheets.length);
+    onProgress?.(snapshots.length,targets.length);
   }
   checkCancel(signal);
-  return {snapshots, omitted:Math.max(0,sheets.length-12)};
+  return {snapshots, sheets, omitted:Math.max(0,sheets.filter(s=>s.visibility==='Visible').length-12)};
+}
+
+export async function watchSheets(onChange) {
+  if (!supported('1.7')) throw Error('Workbook monitoring requires ExcelApi 1.7.');
+  return Excel.run(async ctx=>{
+    const list=ctx.workbook.worksheets;
+    list.load('items/id,items/visibility');
+    await ctx.sync();
+    const registrations=list.items.filter(s=>s.visibility==='Visible').slice(0,12).map(s=>{
+      const id=s.id;
+      return s.onChanged.add(event=>onChange(id,event.address));
+    });
+    await ctx.sync();
+    return async () => Excel.run(ctx,async current=>{
+      registrations.forEach(registration=>registration.remove());
+      await current.sync();
+    });
+  });
 }
 
 export async function selection() {
@@ -71,6 +95,24 @@ async function loadSource(ctx,action) {
   return {sheet,range,snapshot:read(range,sheet)};
 }
 
+export async function inspectRange(sheetId,address) {
+  rect(address);
+  return Excel.run(async ctx => {
+    const {sheet,range,snapshot}=await loadSource(ctx,{sheetId,address});
+    // Excel's native selection is a view change and leaves cell formatting alone.
+    if (typeof sheet.activate !== 'function' || typeof range.select !== 'function')
+      return {snapshot,selected:false};
+    try {
+      sheet.activate();
+      range.select();
+      await ctx.sync();
+      return {snapshot,selected:true};
+    } catch {
+      return {snapshot,selected:false};
+    }
+  });
+}
+
 function chartPosition(action) {
   if (action.position) return action.position;
   const {r,c,columns} = rect(action.address);
@@ -88,6 +130,14 @@ async function chartSlot(ctx,sheet,address) {
   const overlap = sheet.charts.items.some(c => c.left < range.left+range.width && c.left+c.width > range.left &&
     c.top < range.top+range.height && c.top+c.height > range.top);
   if (overlap) throw Error('The chart position overlaps an existing chart.');
+}
+
+function checkPriorFormula(snapshot,action) {
+  const prior = snapshot.values[0][0];
+  if (snapshot.types[0][0] === 'Error' ||
+      (formula(snapshot,0,0) ? !correction(snapshot.r1c1[0][0],rect(action.address).c) :
+        prior !== '' && prior !== null && typeof prior !== 'number'))
+    throw Error('Only blank, numeric, and simple arithmetic cells can be safely restored by the formula editor.');
 }
 
 async function formulaContext(ctx,sheet,action) {
@@ -110,17 +160,52 @@ async function formulaContext(ctx,sheet,action) {
   if (!correction(action.value,c) || ![0,1,3,4].every(i=>
     formula(snapshot,i,0) && snapshot.r1c1[i][0]===action.value))
     throw Error('The surrounding formula pattern no longer supports this repair.');
-  return [sourceState(snapshot),inputs.map(cell=>cell.values[0][0])];
+  return {band:snapshot,inputs:inputs.map(cell=>cell.values[0][0])};
+}
+
+async function checkNonnegative(ctx,sheet,range,snapshot) {
+  if (!supported('1.13')) throw Error('This validation requires ExcelApi 1.13 for protected, merged and spill checks.');
+  await writable(ctx,sheet,range,true);
+  range.dataValidation.load('type');
+  await ctx.sync();
+  if (range.dataValidation.type!=='None') throw Error('The selection already has a validation rule. Choose cells without validation.');
+  if (!snapshot.values.some(([v])=>typeof v==='number' && Number.isFinite(v)) ||
+      snapshot.values.some(([v],i)=>snapshot.types[i][0]==='Error'|| (v!=='' && v!==null && (typeof v!=='number'||v<0))))
+    throw Error('Select numeric cells without headers or existing negative values.');
 }
 
 export async function preview(action) {
   validate(action);
   return Excel.run(async ctx => {
-    const {snapshot,sheet} = await loadSource(ctx,action);
+    const {snapshot,sheet,range} = await loadSource(ctx,action);
     const visual = ['chart','dashboard'].includes(action.kind);
     if (visual && !supported('1.10')) throw Error('Charts require ExcelApi 1.10.');
-    let destination, position, formulaEvidence;
+    let destination, position, formulaEvidence, currentStyle, report;
+    if (action.kind==='nonnegative') await checkNonnegative(ctx,sheet,range,snapshot);
+    if (action.kind==='pivot') {
+      if (!supported('1.8')) throw Error('Native PivotTables require ExcelApi 1.8.');
+      const protection=ctx.workbook.protection;
+      protection.load('protected');
+      await ctx.sync();
+      if (protection.protected) throw Error('Workbook structure is protected.');
+      await assertVisible(ctx,range);
+      report=pivotPreview(snapshot,action);
+    }
+    if (['style','number','trim'].includes(action.kind)) await writable(ctx,sheet,range,true);
+    if (action.kind==='trim') await checkTrim(ctx,range,snapshot);
+    if (action.kind==='style') {
+      loadStyle(range);
+      await ctx.sync();
+      currentStyle=styleState(range);
+    }
+    if (['negative','heatmap','dataBar'].includes(action.kind)) {
+      await writable(ctx,sheet,range,false);
+      await assertVisible(ctx,range);
+      if (!snapshot.values.every(([v])=>typeof v==='number' && Number.isFinite(v)))
+        throw Error('Select numeric values only.');
+    }
     if (action.kind === 'formula') {
+      checkPriorFormula(snapshot,action);
       await writable(ctx,sheet,sheet.getRange(action.address),true);
       formulaEvidence = await formulaContext(ctx,sheet,action);
     }
@@ -134,9 +219,19 @@ export async function preview(action) {
       await chartSlot(ctx,target,position);
     }
     const data = visual ? chartData(snapshot, action.type) : null;
-    if (action.kind === 'dashboard' && !/^(?:total )?(?:sales|revenue|units|quantity|orders)(?: \([A-Z]{3}\))?$/i.test(data.y))
-      throw Error('Dashboard totals require an explicitly additive heading.');
-    return {action:structuredClone(action), snapshot, data, destination, position, formulaEvidence};
+    if (visual) await assertVisible(ctx,range);
+    if (action.kind==='chart') {
+      const target=action.destination?ctx.workbook.worksheets.getItem(action.destination):sheet;
+      await writable(ctx,target,null,false);
+    }
+    if (action.kind === 'dashboard') {
+      if (!additiveMeasure(data.y,action)) throw Error('Dashboard totals require an additive metric.');
+      const protection=ctx.workbook.protection;
+      protection.load('protected');
+      await ctx.sync();
+      if (protection.protected) throw Error('Workbook structure is protected.');
+    }
+    return {action:structuredClone(action), snapshot, data, destination, position, formulaEvidence,currentStyle,report};
   });
 }
 
@@ -161,6 +256,17 @@ async function assertVisible(ctx,range) {
   range.load('rowHidden,columnHidden');
   await ctx.sync();
   if (range.rowHidden !== false || range.columnHidden !== false) throw Error('Chart sources must be visible and unfiltered.');
+}
+
+async function checkTrim(ctx,range,snapshot) {
+  const tables=range.getTables(false);
+  tables.load('items/name');
+  await ctx.sync();
+  const before=snapshot.values[0][0];
+  const after=trimText(before);
+  if (tables.items.length || snapshot.types[0][0]!=='String' || formula(snapshot,0,0) || after===null)
+    throw Error('Choose eligible literal text outside an Excel table.');
+  return after;
 }
 
 function styleState(range) {
@@ -264,18 +370,72 @@ async function dashboard(ctx,source,action,data,sourceName) {
   return name + ' · ' + chartName;
 }
 
+async function createPivot(ctx,range,snapshot,action) {
+  if (!supported('1.8')) throw Error('Native PivotTables require ExcelApi 1.8.');
+  await assertVisible(ctx,range);
+  const report=pivotPreview(snapshot,action), wb=ctx.workbook;
+  const sheets=wb.worksheets;
+  sheets.load('items/name');wb.protection.load('protected');
+  wb.pivotTables.load('items/name');
+  await ctx.sync();
+  if (wb.protection.protected) throw Error('Workbook structure is protected.');
+  const names=new Set([...sheets.items,...wb.pivotTables.items].map(x=>x.name.toLowerCase()));
+  let suffix=1;
+  while (names.has(('Forma report '+suffix).toLowerCase()) || names.has(('FormaReport'+suffix).toLowerCase())) suffix++;
+  const sheetName='Forma report '+suffix, pivotName='FormaReport'+suffix;
+  const target=sheets.add(sheetName);
+  const pivot=target.pivotTables.add(pivotName,range,target.getRange('A3'));
+  pivot.rowHierarchies.add(pivot.hierarchies.getItem(report.dimension));
+  const measure=pivot.dataHierarchies.add(pivot.hierarchies.getItem(report.measure));
+  measure.summarizeBy='Sum';
+  pivot.load('name');
+  pivot.rowHierarchies.load('items/name');
+  pivot.dataHierarchies.load('items/summarizeBy');
+  const body=pivot.layout.getDataBodyRange();
+  body.load('values');
+  await ctx.sync();
+  const got=body.values.flat();
+  const want=report.groups.map(g=>g.sum);
+  const near=(a,b)=>typeof a==='number' && Math.abs(a-b)<=1e-9*Math.max(1,Math.abs(b));
+  const ordered=[...want].sort((a,b)=>a-b);
+  const matches=rows=>rows.length===want.length && [...rows].sort((a,b)=>a-b)
+    .every((v,i)=>near(v,ordered[i]));
+  const totalsMatch=matches(got) || (got.length===want.length+1 &&
+    near(got.at(-1),want.reduce((a,b)=>a+b,0)) && matches(got.slice(0,-1)));
+  if (pivot.name!==pivotName || pivot.rowHierarchies.items[0]?.name!==report.dimension ||
+      pivot.dataHierarchies.items[0]?.summarizeBy!=='Sum' || !totalsMatch)
+    throw Error('The PivotTable was created but its output could not be verified. Inspect '+sheetName+' before retrying.');
+  return {description:sheetName+' · '+pivotName};
+}
+
 export async function apply(p) {
   const {action} = p;
   validate(action);
   return Excel.run(async ctx => {
     const {sheet,range,snapshot} = await loadSource(ctx,action);
     if (!equal(sourceState(snapshot),sourceState(p.snapshot))) throw Error('Source changed. Preview the operation again.');
+    if (action.kind==='pivot') return createPivot(ctx,range,snapshot,action);
+    if (action.kind==='nonnegative') {
+      await checkNonnegative(ctx,sheet,range,snapshot);
+      const validation=range.dataValidation;
+      validation.rule={decimal:{operator:'GreaterThanOrEqualTo',formula1:0}};
+      validation.ignoreBlanks=true;
+      validation.errorAlert={showAlert:true,style:'Stop',title:'Enter a non-negative number',message:'Enter zero or a positive number.'};
+      validation.load('type,rule,ignoreBlanks,errorAlert');range.load(properties);
+      await ctx.sync();
+      const rule=validation.rule?.decimal, threshold=rule?.formula1;
+      if (validation.type!=='Decimal'||rule?.operator!=='GreaterThanOrEqualTo'||
+          ![0,'0','=0'].includes(threshold)||!validation.ignoreBlanks||validation.errorAlert?.style!=='Stop'||
+          !validation.errorAlert?.showAlert||!equal(sourceState(read(range,sheet)),sourceState(snapshot)))
+        throw Error('Excel did not verify the validation rule. Inspect the range before retrying.');
+      return {description:sheet.name+'!'+action.address};
+    }
     if (['chart','dashboard'].includes(action.kind)) {
       if (!supported('1.10')) throw Error('Charts require ExcelApi 1.10.');
       const data = chartData(snapshot,action.type);
       await assertVisible(ctx,range);
       if (action.kind === 'dashboard') {
-          if (!/^(?:total )?(?:sales|revenue|units|quantity|orders)(?: \([A-Z]{3}\))?$/i.test(data.y))
+          if (!additiveMeasure(data.y,action))
           throw Error('Dashboard totals require an explicitly additive heading.');
         return {description:await dashboard(ctx,range,action,data,snapshot.name)};
       }
@@ -318,18 +478,20 @@ export async function apply(p) {
     await writable(ctx,sheet,range,true);
     if (action.kind==='formula' && !equal(await formulaContext(ctx,sheet,action),p.formulaEvidence))
       throw Error('The formula context changed. Preview again.');
-    let nextStyle;
+    let nextStyle, trimmed;
     if (action.kind === 'style') {
-      nextStyle = [true,'#FFFFFF',(action.color || palettes[action.value]).toUpperCase()];
+      loadStyle(range);
+      await ctx.sync();
+      if (!equal(styleState(range),p.currentStyle)) throw Error('The source style changed. Preview the change again.');
+      nextStyle = headingStyle(action);
       setStyle(range,nextStyle);
+    } else if (action.kind==='trim') {
+      trimmed=await checkTrim(ctx,range,snapshot);
+      range.values=[[trimmed]];
     } else if (action.kind === 'number') {
       range.numberFormat = snapshot.values.map(row=>row.map(()=>action.value));
     } else {
-      const prior = snapshot.values[0][0];
-      if (snapshot.types[0][0] === 'Error' ||
-          (formula(snapshot,0,0) ? !correction(snapshot.r1c1[0][0],rect(action.address).c) :
-            prior !== '' && prior !== null && typeof prior !== 'number'))
-        throw Error('Only blank, numeric, and simple arithmetic cells can be safely restored by the formula editor.');
+      checkPriorFormula(snapshot,action);
       range.formulasR1C1 = [[action.value]];
     }
     range.load(properties);
@@ -337,6 +499,8 @@ export async function apply(p) {
     await ctx.sync();
     const after = read(range,sheet);
     const verified = action.kind === 'formula' ? after.r1c1[0][0] === action.value && after.types[0][0] !== 'Error'
+      : action.kind==='trim'?after.values[0][0]===trimmed && after.types[0][0]==='String' &&
+        !formula(after,0,0) && equal(after.formats,snapshot.formats)
       : equal(content(snapshot),content(after)) && (action.kind === 'number'
         ? after.formats.every(row=>row.every(value=>value===action.value))
         : equal(styleState(range).map(v=>typeof v==='string'?v.toUpperCase():v),nextStyle));
@@ -362,6 +526,14 @@ export async function rollback(recovery) {
     await writable(ctx,sheet,range,true);
     if (!equal(sourceState(snapshot),sourceState(after))) throw Error('The range changed after applying the operation. Undo was skipped.');
     if (action.kind === 'number') range.numberFormat = before.formats;
+    else if (action.kind==='trim') {
+      const tables=range.getTables(false);
+      tables.load('items/name');
+      await ctx.sync();
+      if (tables.items.length || trimText(before.values[0][0])!==snapshot.values[0][0])
+        throw Error('This text cell cannot be safely restored.');
+      range.values=before.values;
+    }
     else if (action.kind === 'formula') {
       await formulaContext(ctx,sheet,action);
       range.formulasR1C1 = before.r1c1;
@@ -370,5 +542,70 @@ export async function rollback(recovery) {
     await ctx.sync();
     const restored = read(range,sheet);
     if (!equal(content(restored),content(before)) || !equal(restored.formats,before.formats)) throw Error('Undo could not be verified.');
+  });
+}
+
+// Long selections are loaded in bounded blocks. No cells are changed.
+export async function readDataset(signal,onProgress,target,expand=false) {
+  return Excel.run(async ctx=>{
+    if (target) rect(target.address,DATASET_CELL_LIMIT);
+    let range=target?ctx.workbook.worksheets.getItem(target.sheetId).getRange(target.address):ctx.workbook.getSelectedRange();
+    const sheet=range.worksheet;
+    const dimensions='rowIndex,columnIndex,rowCount,columnCount';
+    range.load(dimensions);sheet.load('id,name,visibility');
+    await ctx.sync();
+    if (expand && range.rowCount===1 && range.columnCount===1 && supported('1.7') &&
+        typeof range.getSurroundingRegion==='function') {
+      range=range.getSurroundingRegion();range.load(dimensions);await ctx.sync();
+    }
+    const {rowIndex:r,columnIndex:c,rowCount:rows,columnCount:columns}=range;
+    if (sheet.visibility!=='Visible') throw Error('Select a range on a visible worksheet.');
+    if (rows<2 || columns<1 || rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
+      throw Error('Select a header and data within 50,000 rows and 160,000 cells.');
+    const values=[],errors=[];
+    const blockSize=Math.max(1,Math.min(2000,Math.floor(8000/columns)));
+    let textSize=0;
+    for (let offset=0;offset<rows;offset+=blockSize) {
+      checkCancel(signal);
+      const block=sheet.getRange(a1(r+offset,c,Math.min(blockSize,rows-offset),columns));
+      block.load('values,valueTypes');await ctx.sync();
+      for (let i=0;i<block.values.length;i++) {
+        const row=block.values[i];
+        textSize+=row.reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
+        if (textSize>4000000) throw Error('This selection contains too much text. Choose fewer columns or rows.');
+        values.push(row);
+        errors.push(block.valueTypes[i].flatMap((v,j)=>v==='Error'?[j]:[]));
+      }
+      onProgress?.(values.length,rows);
+    }
+    checkCancel(signal);
+    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),values,errors};
+  });
+}
+
+
+export async function readContext(target) {
+  rect(target.address);
+  return Excel.run(async ctx=>(await loadSource(ctx,target)).snapshot);
+}
+
+
+export async function selectionAnchor() {
+  return Excel.run(async ctx=>{
+    const range=ctx.workbook.getSelectedRange(),sheet=range.worksheet;
+    range.load('rowIndex,columnIndex,rowCount,columnCount');sheet.load('id,name,visibility');
+    await ctx.sync();
+    if (sheet.visibility!=='Visible') throw Error('Select cells on a visible worksheet.');
+    return {id:sheet.id,name:sheet.name,address:a1(range.rowIndex,range.columnIndex,range.rowCount,range.columnCount),
+      rows:range.rowCount,columns:range.columnCount};
+  });
+}
+
+export async function activeWorksheet() {
+  return Excel.run(async ctx=>{
+    const sheet=ctx.workbook.worksheets.getActiveWorksheet();
+    sheet.load('id,name');
+    await ctx.sync();
+    return {id:sheet.id,name:sheet.name};
   });
 }
