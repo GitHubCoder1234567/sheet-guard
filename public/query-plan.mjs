@@ -1,11 +1,14 @@
 import {datasetColumns} from './engine.mjs';
 import {cellRecord,rangeShape} from './workbook-data.mjs';
+import {chooseDiscoveredRegion} from './discovery.mjs';
 
 const quoted=String.raw`"(?:[^"\\\x00-\x1f]|\\["\\])+"`;
 const literal=String.raw`(?:${quoted}|""|true|false|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?)`;
 const fieldToken=String.raw`(?:${quoted}|[^"]+?)`;
 const request=new RegExp(String.raw`^(?:rank (${fieldToken}) by (?:the )?total (${fieldToken})|(?:calculate |show (?:me )?)?(?:total|sum of) (${fieldToken}) by (${fieldToken})) where (.+)$`,'i');
 const predicate=new RegExp(String.raw`^\s*(${quoted})\s*(<=|>=|!=|=|<|>)\s*(${literal})(?=\s+and\s+|\s*$)`,'i');
+const scope=new RegExp(String.raw`\s+in (table|named range|worksheet) (${quoted})$`,'i');
+const scopeKeys={table:'table','named range':'namedRange',worksheet:'worksheet'};
 const quotedField=new RegExp('^'+quoted+'$');
 const operators=new Set(['=','!=','>','<','>=','<=']);
 const fieldLimit=255;
@@ -27,7 +30,9 @@ export function conditionalQuery(question) {
     if (!match) throw Error(example);
     const [,group,measure,alternateMeasure,alternateGroup,where]=match;
     const filters=[];
-    let rest=where;
+    const requestedSource=scope.exec(where);
+    const target=requestedSource?{[scopeKeys[requestedSource[1].toLowerCase()]]:JSON.parse(requestedSource[2])}:null;
+    let rest=requestedSource?where.slice(0,requestedSource.index):where;
     while (rest) {
       const item=predicate.exec(rest);
       if (!item || filters.length===filterLimit) throw Error(example);
@@ -37,7 +42,7 @@ export function conditionalQuery(question) {
       if (rest) rest=rest.replace(/^and\s+/i,'');
     }
     const plan={kind:'conditional-ranking',group:fieldPart(group??alternateGroup),
-      measure:fieldPart(measure??alternateMeasure),filters};
+      measure:fieldPart(measure??alternateMeasure),filters,...(target?{target}:{})};
     validateQueryPlan(plan);
     return {plan};
   } catch {return {error:example};}
@@ -49,10 +54,16 @@ function exactKeys(object,keys) {
 const fieldName=value=>typeof value==='string'&&value.trim().length>0&&value.length<=fieldLimit;
 
 function validateQueryPlan(plan) {
-  if (!exactKeys(plan,['kind','group','measure','filters'])||plan.kind!=='conditional-ranking'||
+  const keys=['kind','group','measure','filters'];
+  if (plan?.target!==undefined) keys.push('target');
+  if (!exactKeys(plan,keys)||plan.kind!=='conditional-ranking'||
       !fieldName(plan.group)||!fieldName(plan.measure)||!Array.isArray(plan.filters)||
       plan.filters.length<1||plan.filters.length>filterLimit)
     throw Error('The conditional ranking plan is invalid.');
+  if (keys.includes('target')) {
+    const key=Object.values(scopeKeys).find(k=>exactKeys(plan.target,[k]));
+    if (!key||!fieldName(plan.target[key])) throw Error('The dataset source is invalid.');
+  }
   for (const filter of plan.filters) {
     if (!exactKeys(filter,['field','op','value'])||!fieldName(filter.field)||!operators.has(filter.op))
       throw Error('The filter plan is invalid.');
@@ -99,4 +110,15 @@ export function evaluateQueryPlan(dataset,plan) {
   return {fields:{dimension:headers[group],measure:headers[measure]},rows,unmatched,untyped,
     condition:predicates.map(({field,op,value})=>JSON.stringify(field)+' '+op+' '+JSON.stringify(value)).join(' and '),
     signature:JSON.stringify(observed)};
+}
+
+// Resolve the source before binding columns and evaluating any analytical step.
+export async function readPlannedDataset(plan,readDataset) {
+  validateQueryPlan(plan);
+  const dataset=await readDataset(plan.target,!plan.target,true);
+  if (dataset.partial) throw Error('Conditional ranking requires the full requested range.');
+  if (!plan.target?.worksheet) return dataset;
+  const region=chooseDiscoveredRegion(dataset);
+  if (!region) throw Error('Forma could not identify one dataset on the requested worksheet. Use an Excel table, a workbook-scoped named range, or select the header and data.');
+  return region;
 }

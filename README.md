@@ -60,3 +60,5 @@ Run `sh tools/verify.sh` with Node, Python 3, OpenSSL and Playwright. Set `CHROM
 Select a dataset with its header row and ask `Rank "Team" by total "Hours" where "Status" = "Open" and "Priority" >= 2`. Use exact headers. The result shows ranked totals and lets you inspect contributing measure and filter cells. Text comparisons are case-sensitive. Numeric filters compare underlying Excel numbers. The plan supports up to four conditions joined by `and` and runs entirely inside the add-in.
 
 See the [Forma 5.0 roadmap](docs/forma-5-roadmap.md) and [verification report](docs/forma-5-conditional-analysis.md).
+
+Append `in table "Actuals"`, `in named range "CurrentData"`, or `in worksheet "Operations"` to target a source without changing the selection. A worksheet request requires a single unambiguous dataset. Use **Audit → Discover worksheet datasets** for a fresh profile of the active sheet. See the [31-section completion matrix](docs/forma-5-completion-matrix.md).

@@ -533,3 +533,37 @@ test('cross-sheet key inspection warns about record multiplication without writi
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
   assert.deepEqual(errors,[]);
 });
+
+test('named-table plans use the table owner and surface deletion before showing saved evidence',async t=>{
+  const office=workbookDouble.replace("const book = {",
+    "const owner={...sheet,id:'remote-sheet',name:'Second worksheet'};"+
+    "let deleted=false;window.deleteDataset=()=>{deleted=true;};"+
+    "const dataset={name:'ImportedData',showHeaders:true,showTotals:false,worksheet:owner,load(){},getRange:()=>range()};"+
+    "const book = {tables:{getItemOrNullObject:()=>deleted?{isNullObject:true,load(){}}:dataset},");
+  let requests=0;
+  const {page,errors}=await fixture(t,office,()=>{requests++;return {status:500};});
+  await page.getByRole('textbox',{name:'Workbook question'}).fill(
+    'Rank "Month" by total "Revenue" where "Revenue" >= 18 in table "ImportedData"');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByText('Highest total Revenue: April · 26',{exact:false}).waitFor();
+  await page.getByRole('button',{name:'April',exact:true}).click();
+  await page.getByText('Second worksheet!A5 · April / Second worksheet!B5 = 26',{exact:true}).waitFor();
+  await page.evaluate(()=>window.deleteDataset());
+  await page.getByRole('button',{name:'April',exact:true}).click();
+  await page.getByText('The selected Excel table no longer exists.',{exact:true}).waitFor();
+  assert.equal(requests,0);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+  assert.deepEqual(errors,[]);
+});
+
+test('worksheet discovery reads fresh cells and reports the same worksheet identity as the sample',async t=>{
+  const office=workbookDouble.replace('let formats=','window.renameField=()=>{values[0][1]="Utilization";};let formats=');
+  const {page}=await fixture(t,office);
+  await page.evaluate(()=>window.renameField());
+  await openView(page,'Audit');
+  await page.getByRole('button',{name:'Discover worksheet datasets',exact:true}).click();
+  await page.getByRole('heading',{name:'Monthly',exact:true}).waitFor();
+  await page.getByText('A1:B5 · supported',{exact:true}).click();
+  await page.getByText('Utilization · numeric measure candidate',{exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+});

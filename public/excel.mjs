@@ -614,12 +614,17 @@ export async function rollback(recovery) {
 
 function targetMode(target) {
   if (!target) return 'selection';
-  const modes=['address','used','table','namedRange'].filter(key=>target[key]);
-  if (modes.length!==1 || typeof target.sheetId!=='string' || !target.sheetId)
-    throw new WorkbookError('invalid_reference','read dataset','Specify exactly one worksheet range, table, or named range.');
+  const modes=['address','used','table','namedRange','worksheet'].filter(key=>Object.hasOwn(target,key));
   const mode=modes[0];
+  const needsId=mode==='used'||mode==='address';
+  const allowedKeys=target.sheetId===undefined?1:2;
+  if (modes.length!==1 || Object.keys(target).length!==allowedKeys ||
+      ((needsId || target.sheetId!==undefined) && (typeof target.sheetId!=='string'||!target.sheetId.trim())) ||
+      mode==='worksheet'&&target.sheetId!==undefined)
+    throw new WorkbookError('invalid_reference','read dataset','Specify exactly one worksheet range, table, or named range.');
+  if (mode==='used' && target.used!==true) throw new WorkbookError('invalid_reference','read dataset','Choose a valid worksheet scope.');
   if (mode==='address') rect(target.address,DATASET_CELL_LIMIT);
-  if (['table','namedRange'].includes(mode) && (typeof target[mode]!=='string' || target[mode].length>255))
+  if (['table','namedRange','worksheet'].includes(mode) && (typeof target[mode]!=='string' || !target[mode].trim() || target[mode].length>255))
     throw new WorkbookError('invalid_reference','read dataset','Choose a valid workbook object name.');
   return mode;
 }
@@ -628,12 +633,13 @@ async function tableSource(ctx,sheet,table) {
   table.load('name,showHeaders,showTotals');
   await ctx.sync();
   if (table.isNullObject) throw new WorkbookError('missing_target','resolve table','The selected Excel table no longer exists.');
+  sheet??=table.worksheet;
   if (!table.showHeaders) throw new WorkbookError('missing_headers','resolve table','Show the Excel table header row before analysing this table.');
   const whole=table.getRange();
   whole.load('rowIndex,columnIndex,rowCount,columnCount');await ctx.sync();
   const rows=whole.rowCount-(table.showTotals?1:0);
   if (rows<2) throw new WorkbookError('empty_dataset','resolve table','The Excel table contains no data rows.');
-  return {range:sheet.getRange(a1(whole.rowIndex,whole.columnIndex,rows,whole.columnCount)),table:table.name};
+  return {sheet,range:sheet.getRange(a1(whole.rowIndex,whole.columnIndex,rows,whole.columnCount)),table:table.name};
 }
 
 async function datasetTarget(ctx,target,mode) {
@@ -641,12 +647,14 @@ async function datasetTarget(ctx,target,mode) {
     const range=ctx.workbook.getSelectedRange();
     return {range,sheet:range.worksheet};
   }
-  const sheet=await resolveWorksheet(ctx,target.sheetId);
-  if (mode==='used') return {sheet,range:sheet.getUsedRangeOrNullObject(true)};
+  const sheet=mode==='worksheet'?await findVisibleWorksheet(ctx,target.worksheet):
+    target.sheetId?await resolveWorksheet(ctx,target.sheetId):null;
+  if (mode==='used'||mode==='worksheet') return {sheet,range:sheet.getUsedRangeOrNullObject(true)};
   if (mode==='address') return {sheet,range:sheet.getRange(target.address)};
   if (mode==='table') {
-    if (!sheet.tables?.getItemOrNullObject) throw new WorkbookError('unsupported','resolve table','This host cannot resolve Excel table names.');
-    return {sheet,...await tableSource(ctx,sheet,sheet.tables.getItemOrNullObject(target.table))};
+    const tables=sheet?sheet.tables:ctx.workbook.tables;
+    if (!tables?.getItemOrNullObject) throw new WorkbookError('unsupported','resolve table','This host cannot resolve Excel table names.');
+    return tableSource(ctx,sheet,tables.getItemOrNullObject(target.table));
   }
   const names=ctx.workbook.names;
   if (!supported('1.4') || !names?.getItemOrNullObject)
@@ -663,9 +671,9 @@ async function datasetTarget(ctx,target,mode) {
     throw new WorkbookError('invalid_reference','resolve named range','The named range no longer refers to available cells.');
   const owner=range.worksheet;
   owner.load('id');await ctx.sync();
-  if (owner.id!==target.sheetId)
+  if (sheet&&owner.id!==target.sheetId)
     throw new WorkbookError('invalid_reference','resolve named range','The named range is unavailable on the specified worksheet.');
-  return {sheet,range};
+  return {sheet:sheet??owner,range};
 }
 
 // Long selections are loaded in bounded blocks. No cells are changed.
@@ -677,7 +685,8 @@ export async function readDataset(signal,onProgress,target,expand=false,evidence
     range.load(dimensions);sheet.load('id,name,visibility');
     await ctx.sync();
     if (range.isNullObject) throw new WorkbookError('empty_dataset','read dataset','This worksheet has no populated data range.');
-    if (expand && range.rowCount===1 && range.columnCount===1) {
+    if (sheet.visibility!=='Visible') throw new WorkbookError('hidden_target','read dataset','The selected dataset is on a hidden worksheet.');
+    if (expand && (mode==='selection'||mode==='address') && range.rowCount===1 && range.columnCount===1) {
       if (supported('1.9') && typeof range.getTables==='function') {
         const tables=range.getTables(false);tables.load('items/name');await ctx.sync();
         if (tables.items.length===1) ({range,table}=await tableSource(ctx,sheet,tables.items[0]));
@@ -686,7 +695,6 @@ export async function readDataset(signal,onProgress,target,expand=false,evidence
       range.load(dimensions);await ctx.sync();
     }
     const {rowIndex:r,columnIndex:c,rowCount:rows,columnCount:columns}=range;
-    if (sheet.visibility!=='Visible') throw Error('Select a range on a visible worksheet.');
     if (rows<2 || columns<1)
       throw new WorkbookError('empty_dataset','read dataset','Select a header and at least one data row.');
     if (rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
@@ -764,12 +772,17 @@ export async function selectEvidenceRange(sheetId,address) {
 }
 
 
+async function findVisibleWorksheet(ctx,name) {
+  const sheets=await worksheetList(ctx);
+  const sheet=sheets.find(s=>s.name.toLowerCase()===name.toLowerCase());
+  if (!sheet) throw new WorkbookError('missing_target','resolve worksheet','Forma could not find a visible worksheet named “'+name+'”. Check the sheet name and try again.');
+  if (sheet.visibility!=='Visible') throw new WorkbookError('hidden_target','resolve worksheet','The named worksheet is hidden.');
+  return sheet;
+}
+
 export async function visibleWorksheetByName(name) {
   return workbookRun('resolve visible worksheet',async ctx=>{
-    const sheets=await worksheetList(ctx);
-    const sheet=sheets.find(s=>s.name.toLowerCase()===name.toLowerCase());
-    if (!sheet || sheet.visibility!=='Visible')
-      throw Error('Forma could not find a visible worksheet named “'+name+'”. Check the sheet name and try again.');
+    const sheet=await findVisibleWorksheet(ctx,name);
     return {id:sheet.id,name:sheet.name};
   });
 }
@@ -783,10 +796,11 @@ export async function inspectWorkbookStructure() {
   });
 }
 
-// A bounded read of object metadata for the active sheet, never worksheet data.
-export async function inspectActiveObjects() {
+// Metadata-only by default. Explicit discovery can request a bounded data sample.
+export async function inspectActiveObjects({sheetId,sample=false}={}) {
   return workbookRun('discover active worksheet objects',async ctx=>{
-    const sheet=ctx.workbook.worksheets.getActiveWorksheet();
+    const sheet=sheetId?await resolveWorksheet(ctx,sheetId):ctx.workbook.worksheets.getActiveWorksheet();
+    sheet.load('id,name');
     const range=sheet.getUsedRangeOrNullObject(true), tables=sheet.tables, charts=sheet.charts, names=ctx.workbook.names;
     range.load('rowIndex,columnIndex,rowCount,columnCount');
     tables?.load('items/name');charts?.load('items/name');
@@ -795,7 +809,7 @@ export async function inspectActiveObjects() {
     const pivots=supported('1.8')?sheet.pivotTables:null;
     pivots?.load('items/name');
     await ctx.sync();
-    const overview={used:range.isNullObject?null:{rows:range.rowCount,columns:range.columnCount,
+    const overview={sheet:{id:sheet.id,name:sheet.name},used:range.isNullObject?null:{rows:range.rowCount,columns:range.columnCount,
       address:a1(range.rowIndex,range.columnIndex,range.rowCount,range.columnCount)},
       protected:sheet.protection?.protected??null,tableCount:tables?.items.length??null,
       chartCount:charts?.items.length??null,pivotCount:pivots?.items.length??null,
@@ -807,7 +821,22 @@ export async function inspectActiveObjects() {
       r.load('rowIndex,columnIndex,rowCount,columnCount');
       overview.tables.push({name:table.name,range:r});
     }
-    if (overview.tables.length) await ctx.sync();
+    let region;
+    if (sample&&overview.used) {
+      const columns=Math.min(30,range.columnCount);
+      const rows=Math.min(150,range.rowCount,Math.floor(LIMIT/columns));
+      const address=a1(range.rowIndex,range.columnIndex,rows,columns);
+      const cells=sheet.getRange(address);
+      cells.load('values,valueTypes,numberFormat,formulas');
+      region={cells,rows,columns,address,partial:rows!==range.rowCount||columns!==range.columnCount};
+    }
+    if (overview.tables.length||region) await ctx.sync();
+    if (region) {
+      const {cells,rows,columns,address,partial}=region;
+      if (cells.values.length!==rows||cells.values.some(row=>row.length!==columns))
+        throw new WorkbookError('partial_read','discover worksheet datasets','Excel returned incomplete data for discovery.');
+      overview.sample={address,partial,values:cells.values,types:cells.valueTypes,formats:cells.numberFormat,formulas:cells.formulas};
+    }
     overview.tables=overview.tables.map(({name,range:r})=>({name,
       address:a1(r.rowIndex,r.columnIndex,r.rowCount,r.columnCount),rows:r.rowCount,columns:r.columnCount}));
     return overview;

@@ -49,7 +49,8 @@ The candidate has completed automated testing. Live Excel and staging verificati
 | protected-sheet | Protect the worksheet before a proposed change. Confirm prohibited changes are blocked and reads report their actual status. |
 | large-range | Paste synthetic data at increasing sizes within the supported 50,000-row and cell limits. Record Office read and total response time. Confirm over-limit requests explain the limit. |
 
-| discovery | Open Audit → Discover active worksheet. With only the sample table present, confirm it reports B4:D8 as the candidate and Total Sales as numeric. |
+| discovery | Open Audit → Discover worksheet datasets. With only the sample table present, confirm it reports B4:D8 as the candidate and Total Sales as numeric. |
+| resource-planning | On another sheet, create the named Excel table TestOrders from the Work orders fixture, including its header. Switch to an unrelated worksheet and ask the same conditional ranking with the suffix `in table "TestOrders"`. Check the table owner's cells. Repeat for a workbook-scoped range and an unambiguous worksheet. Remove the original source and confirm the follow-up refuses the old result. |
 | formula-inspection | In a copy, enter =C5+C6 and select the formula cell. Ask “Explain this formula.” Verify the expression, current result of 70 and its references. |
 | cross-sheet | In Compare, capture the sample on two sheets. Change one amount on the second sheet and compare by Record ID. Expect one changed record. |
 | key-relationships | In a disposable workbook, put headers `Order key` and `Hours` in A1:B1 on the first sheet and enter X, X, Y and Left in A2:A5. On a second sheet, put `Dispatch key` and `Status` in A1:B1 and enter X, X, Y and Right in A2:A5. Use Compare datasets to capture both A1:B5 ranges. Under Inspect key relationships select the two key columns. Expect five matching row pairs and a many-to-many warning for X, with A2 and A3 named on both sheets. |
