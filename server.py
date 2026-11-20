@@ -3,6 +3,7 @@ import base64
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 import ssl
 from http.client import IncompleteRead
@@ -343,6 +344,46 @@ def probe_groq():
         return {"status": "failed", "category": "network_or_timeout"}
 
 
+def build_info():
+    sha = os.getenv("RENDER_GIT_COMMIT", "")
+    valid = re.fullmatch(r"[0-9a-f]{40}", sha)
+    service = os.getenv("RENDER_SERVICE_NAME", "")
+    environment = {"forma-excel-staging": "staging", "sheetguard-ai": "production"}.get(
+        service, "unidentified Render service" if service else "local or unidentified")
+    version = Path(__file__).with_name("VERSION").read_text().strip()
+    return {"version": version, "commit": sha if valid else None, "environment": environment}
+
+
+def candidate_status(info):
+    sha = info["commit"]
+    if not sha:
+        return "unavailable"
+    # Only the public repository and the deployed Git revision leave the server.
+    url = ("https://api.github.com/repos/GitHubCoder1234567/sheet-guard/compare/"
+           + sha + "...codex%2Fforma-5-integration?per_page=1")
+    try:
+        request = Request(url, headers={"User-Agent": "Forma-build-info", "Accept": "application/vnd.github+json"})
+        with urlopen(request, timeout=3) as response:
+            result = json.loads(response.read(2_000_000))
+        return {"ahead": "older", "identical": "current", "behind": "includes_candidate",
+                "diverged": "diverged"}.get(result.get("status"), "unavailable")
+    except (OSError, ValueError, AttributeError, IncompleteRead):
+        return "unavailable"
+
+
+BUILD_CACHE = {}
+BUILD_LOCK = Lock()
+
+
+def cached_build_info():
+    with BUILD_LOCK:
+        if monotonic() >= BUILD_CACHE.get("expires", 0):
+            info = build_info()
+            info["candidate"] = candidate_status(info)
+            BUILD_CACHE.update(info=info, expires=monotonic()+60)
+        return BUILD_CACHE["info"]
+
+
 class Handler(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".mjs": "text/javascript",
                       ".css": "text/css", ".png": "image/png"}
@@ -382,6 +423,8 @@ class Handler(SimpleHTTPRequestHandler):
             commit = os.getenv("RENDER_GIT_COMMIT", "")
             build = commit[:12] if len(commit) == 40 and all(c in "0123456789abcdef" for c in commit) else "development"
             self.respond(200, {"status": "ok", "build": build})
+        elif self.path == "/api/build":
+            self.respond(200, cached_build_info())
         elif self.path == "/api/diagnostics":
             if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
                 return self.respond(403, {"error": "Open the Forma task pane to make this request."})
