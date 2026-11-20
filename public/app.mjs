@@ -7,7 +7,7 @@ import {discoverRegions, chooseDiscoveredRegion} from './discovery.mjs';
 import {formula, formulaReferences, datasetColumns, summariseBy, compareDatasets, a1, rect, previewRows, formulaPreview, headingStyle, profile, audit, categories, chartTypes, palettes, conflict, validate} from './engine.mjs';
 import {inspectActiveObjects, visibleWorksheetByName, selectEvidenceRange, activeWorksheet, readDataset, readContext, selectionAnchor, scan, watchSheets, selection, inspectRange, preview, apply, rollback, supported} from './excel.mjs';
 import {plot} from './plot.mjs';
-import {aggregationEvidence, sameEvidence, evidenceIntent, evidenceGroup, foldLabel} from './evidence.mjs';
+import {aggregationEvidence, groupShares, sameEvidence, evidenceIntent, evidenceGroup, foldLabel} from './evidence.mjs';
 import {calculationGoal, calculatesGoal, datasetAnswer, executeTool, explicitAudit, localQuestion, rankedAnalysis} from './agent.mjs';
 
 const nav = document.querySelector('#nav'), main = document.querySelector('#main');
@@ -638,7 +638,7 @@ function chatView() {
     const evidenceRequest=evidenceIntent(q);
     const local=localQuestion(q);
     if (evidenceRequest && (!local || (state.evidence && evidenceRequest==='normalise'))) {
-      run(()=>submitQuestion(q,()=>answerEvidence(q,evidenceRequest)),'Checking source evidence…');return;
+      run(()=>submitQuestion(q,()=>answerEvidence(q,evidenceRequest),{localOnly:true}),'Checking source evidence…');return;
     }
     if (local) {
       run(()=>submitQuestion(q,()=>answerLocal(q,local)),'Reading workbook…');return;
@@ -758,7 +758,7 @@ async function answerEvidence(question,kind,exactGroup) {
   const prior=state.evidence;
   if (!prior || prior.sessionId!==state.sessionId) throw Error('Calculate the category totals first so Forma can identify their source rows.');
   const {source,fields,queryPlan}=prior;
-  if (queryPlan&&kind!=='records')
+  if (queryPlan&&!['records','group-shares','total-records'].includes(kind))
     throw Error('This filtered ranking supports source records. Run an unfiltered ranking before changing the grouping or proposing edits.');
   const target=source.table?{sheetId:source.sheetId,table:source.table}:{sheetId:source.sheetId,address:source.address};
   const data=await (queryPlan?.target?readPlannedDataset(queryPlan,captureDataset):captureDataset(target,false,true));
@@ -766,6 +766,18 @@ async function answerEvidence(question,kind,exactGroup) {
   if (!sameEvidence(prior,current)) {
     state.evidence=null;
     throw Error('The source cells changed since the previous calculation. Run the ranking again before using its totals or proposing edits.');
+  }
+  if (kind==='group-shares') {
+    const report=groupShares(current);
+    const filter=current.filter?' Filter: '+current.filter.condition+'.':'';
+    state.messages.push({role:'assistant',report,text:'Each group total divided by the included total of '+report.total+
+      ' × 100. Source: '+source.sheet+'!'+source.address+'. '+current.counts.included+' contributing rows.'+filter});
+    return;
+  }
+  if (kind==='total-records') {
+    state.messages.push({role:'assistant',text:'Denominator contributors from all included groups.',
+      rows:current.groups.flatMap(group=>group.records),sheet:source.sheet,sheetId:source.sheetId});
+    return;
   }
   if (kind==='regroup') {
     const report=rankedAnalysis({...fields,sessionId:state.sessionId,normalised:true,operation:'highest'},data);
@@ -814,28 +826,31 @@ function rankingTable(message) {
   const pages=Math.ceil(report.groups.length/pageSize), page=message.page??0;
   const table=node('table',undefined,'ranking-table'), caption=node('caption','Ranked totals · '+report.groups.length.toLocaleString()+' groups');
   const header=node('thead'), columns=node('tr');
-  for (const label of ['Rank',report.dimension,report.measure,'Rows']) columns.append(node('th',label));
+  for (const label of ['Rank',report.dimension,report.measure,'Rows',...(report.total!==undefined?['Share']:[])]) columns.append(node('th',label));
   header.append(columns);table.append(caption,header);
   const body=node('tbody');
+  const showRecords=(kind,group)=>run(async()=>{
+    const previous=state.evidence;
+    state.evidence=report.evidence;
+    try {await answerEvidence('',kind,group);}
+    catch(error) {
+      if (state.evidence!==null) state.evidence=previous;
+      throw error;
+    }
+  },'Checking source records…');
   for (const group of report.groups.slice(page*pageSize,(page+1)*pageSize)) {
     const row=node('tr');
     const category=node('td');
-    category.append(button(String(group.label),()=>run(async()=>{
-      const previous=state.evidence;
-      state.evidence=report.evidence;
-      try {await answerEvidence('', 'records',group.label);}
-      catch(error) {
-        if (state.evidence!==null) state.evidence=previous;
-        throw error;
-      }
-    },'Checking source records…')));
+    category.append(button(String(group.label),()=>showRecords('records',group.label)));
     row.append(node('td',group.rank),category,node('td',group.sum.toLocaleString(undefined,{maximumFractionDigits:10})),
       node('td',group.records));
+    if (report.total!==undefined) row.append(node('td',group.percent.toLocaleString(undefined,{maximumFractionDigits:6})+'%'));
     body.append(row);
   }
   table.append(body);
   const wrap=node('div',undefined,'ranking-wrap');
   wrap.append(table,node('p','Select a category to see its source records.','muted'));
+  if (report.total!==undefined) wrap.append(button('Denominator sources',()=>showRecords('total-records')));
   if (pages>1) {
     const controls=node('div',undefined,'actions');
     const change=delta=>{message.page=page+delta;render();};

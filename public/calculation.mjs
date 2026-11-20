@@ -5,7 +5,7 @@ const arithmetic=new Set(['sum','average','minimum','maximum','median']);
 const operations=new Set([...arithmetic,'numeric count','non-empty count','distinct count']);
 export const supportedColumnOperation=operation=>operations.has(operation);
 
-function checkedSum(numbers) {
+export function checkedSum(numbers) {
   let sum=0, compensation=0;
   for (const n of numbers) {
     const corrected=n-compensation, next=sum+corrected;

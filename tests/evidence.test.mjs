@@ -77,3 +77,15 @@ test('imperative named-sheet ranking resolves the user’s exact query before cl
   assert.equal(result.groups[0].sum,4780);
   assert.deepEqual(result.evidence.groups[0].records.map(r=>r.measureCell),['E2','E3']);
 });
+
+test('share denominator guards cancellation and preserves signed totals and ties',async()=>{
+  const {groupShares}=await import('../public/evidence.mjs');
+  const evidence=sums=>({fields:{dimension:'Type',measure:'Delta'},
+    groups:sums.map((sum,i)=>({label:i,sum,records:[{sourceRow:20+i}]}))});
+  assert.throws(()=>groupShares(evidence([4,-4])),/sum to zero/);
+  const ledger=evidence([5,5,-2]);
+  const report=groupShares(ledger);
+  assert.equal(report.total,8);
+  assert.deepEqual(report.groups.map(g=>[g.rank,g.percent]),[[1,62.5],[1,62.5],[3,-25]]);
+  assert.equal(report.evidence,ledger);
+});

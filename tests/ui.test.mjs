@@ -627,3 +627,26 @@ test('paraphrased total comparison uses provider-selected fields after inspectio
   assert.equal(hits,2);
   assert.deepEqual(errors,[]);
 });
+
+test('group shares use the filtered ranking ledger, including predicate cells and stale denominator checks',async t=>{
+  const office=workbookDouble.replace("['Month','Revenue'],['January',12],['February',18],['March',22],['April',26]",
+    "['Bench','Hours','Released'],['East',2,true],['East',98,false],['West',6,true],['East',2,true]")
+    .replaceAll('A1:B5','A1:C5').replace('let formats=','window.releaseOther=()=>{values[2][2]=true;};let formats=');
+  const {page,errors}=await fixture(t,office);
+  const q=page.getByRole('textbox',{name:'Workbook question'});
+  const send=page.getByRole('button',{name:'Send',exact:true});
+  await q.fill('Rank "Bench" by total "Hours" where "Released" = true');await send.click();
+  await page.getByText('Highest total Hours: West · 6',{exact:false}).waitFor();
+  await q.fill("Show each group's share of the filtered total");await send.click();
+  const shares=page.locator('.ranking-wrap').filter({has:page.getByRole('button',{name:'Denominator sources'})});
+  await shares.getByText('60%',{exact:true}).waitFor();
+  assert.deepEqual(await shares.locator('tbody tr').allTextContents(),['1West6160%','2East4240%']);
+  await shares.getByRole('button',{name:'Denominator sources'}).click();
+  await page.getByText('Monthly!C5 (Released) = true',{exact:true}).waitFor();
+  assert.equal(await page.getByText('Monthly!B3 = 98',{exact:false}).count(),0);
+  await page.evaluate(()=>window.releaseOther());
+  await shares.getByRole('button',{name:'Denominator sources'}).click();
+  await page.getByText('The source cells changed',{exact:false}).waitFor();
+  assert.deepEqual(errors,[]);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+});

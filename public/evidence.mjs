@@ -1,3 +1,4 @@
+import {checkedSum} from './calculation.mjs';
 import {a1, datasetColumns, summariseBy} from './engine.mjs';
 import {cellRecord, explicitCurrencyCodes, rangeShape} from './workbook-data.mjs';
 import {evaluateQueryPlan} from './query-plan.mjs';
@@ -76,12 +77,34 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false,q
     signature:JSON.stringify([source,fields,records,excluded,empty,filter?.signature??null])};
 }
 
+export function rankedGroups(evidence) {
+  let rank=0;
+  return evidence.groups.map(({label,sum,records},index)=>{
+    if (!index||sum!==evidence.groups[index-1].sum) rank=index+1;
+    return {label,sum,records:records.length,rank};
+  });
+}
+
+// Both operands derive from the same replayed ledger, including its filter exclusions.
+export function groupShares(evidence) {
+  const groups=rankedGroups(evidence);
+  const total=checkedSum(groups.map(group=>group.sum));
+  if (!total) throw Error('The included group totals sum to zero. Their percentage shares are undefined.');
+  for (const group of groups) {
+    group.percent=group.sum/total*100;
+    if (!Number.isFinite(group.percent)) throw Error('A percentage exceeds the finite numeric range.');
+  }
+  return {...evidence.fields,evidence,groups,total};
+}
+
 export function sameEvidence(previous,next) {
   return previous.version===next.version && previous.grouping===next.grouping && previous.signature===next.signature;
 }
 
 export function evidenceIntent(question) {
   const q=question.trim();
+  if (/^(?:please )?(?:show|calculate|give me) (?:each|every) (?:group|category)(?:'s|’s) (?:percentage |percent )?share of (?:the |that )(?:filtered |included |grand )?total[.!?]?$/i.test(q))
+    return 'group-shares';
   if (/\b(?:fix|normalise|normalize|standardise|standardize)\b.*\b(?:categor(?:y|ies)|labels?)\b/i.test(q) &&
       !/^\s*(?:how|why|what)\b/i.test(q)) return 'normalise';
   if (/^(?:please )?(?:group|calculate|rank|recalculate).+\b(?:case.insensitiv(?:e|ely)|ignore case)\b/i.test(q))
