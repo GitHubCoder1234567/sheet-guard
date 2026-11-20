@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 WORKDIR /app
-COPY server.py ./
+COPY server.py VERSION ./
 COPY public ./public
 ENV SHEETGUARD_MODE=production HOST=0.0.0.0 PORT=3000 PYTHONDONTWRITEBYTECODE=1
 USER 65534:65534

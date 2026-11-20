@@ -650,3 +650,11 @@ test('group shares use the filtered ranking ledger, including predicate cells an
   assert.deepEqual(errors,[]);
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
 });
+
+test('About Forma shows deployed metadata and flags a newer integrated candidate',async t=>{
+  const {page}=await fixture(t);
+  await page.route('**/api/build',route=>route.fulfill({json:{version:'5.0.0-dev',environment:'staging',commit:'abcd'.repeat(10),candidate:'older'}}));
+  await openView(page,'Settings');
+  await page.getByText('About Forma',{exact:true}).click();
+  await page.getByText('Forma 5.0.0-dev · staging · build abcdabcdabcd. A newer integrated candidate is available.',{exact:true}).waitFor();
+});

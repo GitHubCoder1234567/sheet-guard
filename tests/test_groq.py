@@ -116,3 +116,15 @@ class GroqTests(unittest.TestCase):
             with self.assertRaises(server.GroqProtocolError) as error:
                 server.groq_reason(data,"test-key")
         self.assertEqual(error.exception.category,"explanation_requested_action")
+
+class BuildInfoTests(unittest.TestCase):
+    def test_candidate_comparison_direction_and_unavailable(self):
+        with patch.dict(os.environ, {"RENDER_SERVICE_NAME": "forma-excel-staging", "RENDER_GIT_COMMIT": "a"*40}):
+            info=server.build_info()
+        self.assertEqual(info["environment"], "staging")
+        self.assertEqual(info["commit"], "a"*40)
+        for status,expected in [("ahead","older"),("behind","includes_candidate"),("identical","current"),("diverged","diverged")]:
+            with patch.object(server,"urlopen",return_value=io.BytesIO(json.dumps({"status":status}).encode())):
+                self.assertEqual(server.candidate_status(info),expected)
+        with patch.object(server,"urlopen",side_effect=TimeoutError()):
+            self.assertEqual(server.candidate_status(info),"unavailable")

@@ -1265,7 +1265,22 @@ function diagnosticSettings() {
   return section;
 }
 function settingsView() {
-  main.append(diagnosticSettings());
+  const about=node('details',undefined,'details');
+  const details=node('p','Loading build information…');
+  about.append(node('summary','About Forma'),details);
+  about.addEventListener('toggle',async()=>{
+    if (!about.open) return;
+    try {
+      const response=await fetch('/api/build',{cache:'no-store'});
+      if (!response.ok) throw Error();
+      const info=await response.json();
+      const status={older:'A newer integrated candidate is available.',current:'Matches the latest integrated candidate.',
+        includes_candidate:'Includes the latest integrated candidate.',diverged:'Build history differs from the integrated candidate.'};
+      details.textContent='Forma '+info.version+' · '+info.environment+' · build '+(info.commit?.slice(0,12)??'unavailable')+
+        '. '+(status[info.candidate]??'Latest integrated candidate could not be verified.');
+    } catch {details.textContent='Build information is unavailable. Reopen About Forma to retry.';}
+  });
+  main.append(about,diagnosticSettings());
   const opt=node('input');opt.type='checkbox';opt.checked=state.consent;opt.disabled=state.busy;
   opt.addEventListener('change',()=>{state.consent=opt.checked;render();});
   const label=node('label',undefined,'check');label.append(opt,node('span','Allow AI data sharing for this session'));
