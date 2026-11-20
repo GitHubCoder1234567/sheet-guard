@@ -243,7 +243,9 @@ export function rankedAnalysis(intent,d) {
   const headers=datasetColumns(d.values);
   const fields=resolveRankFields(intent,headers);
   const evidence=aggregationEvidence(d,fields,intent);
-  if (!evidence.groups.length) throw Error('No eligible numeric rows in '+source(d)+'. Check the sales and category cells.');
+  if (!evidence.groups.length) throw Error(evidence.filter?
+    'No rows both matched the filters and had an eligible grouping value and numeric measure in '+source(d)+'.':
+    'No eligible numeric rows in '+source(d)+'. Check the measure and grouping cells.');
   const {counts,source:scope}=evidence;
   const codes=new Set(evidence.observations.measureFormats.flatMap(format=>
     format.match(/\b(?:AUD|USD|NZD|CAD|EUR|GBP|JPY|CHF|CNY|INR)\b/g)??[]));
@@ -268,6 +270,8 @@ export function rankedAnalysis(intent,d) {
     (intent.normalised?'Text labels are grouped case-insensitively with trimmed, collapsed whitespace. ':
       'Category labels are grouped exactly as entered. ')+
     'Repeated records are counted separately'+(counts.repeatedIdRows?' ('+counts.repeatedIdRows+' repeated identifier occurrence(s))':'')+
-    '. The full requested range includes hidden and filtered rows. Scope: '+source(d)+'.';
+    '. The full requested range includes hidden and filtered rows. Scope: '+source(d)+'.'+
+    (evidence.filter?' Filter: '+evidence.filter.condition+'. '+evidence.filter.unmatched+' rows did not match and '+
+      evidence.filter.untyped+' lacked compatible filter values. Numeric filters compare underlying Excel values.':'');
   return {text,groups,...fields,evidence};
 }

@@ -472,3 +472,38 @@ test('column median uses selected workbook values, exposes cells and never calls
   assert.equal(requests,0);
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
 });
+
+test('conditional ranking stays local and visibly rechecks original measure and predicate cells',async t=>{
+  const mock=workbookDouble
+    .replace("['Month','Revenue'],['January',12],['February',18],['March',22],['April',26]",
+      "['Unit','Hours','Phase','Priority'],['Alpha',12,'Active',2],['Beta',90,'Closed',3],['Beta',21,'Active',4],['Alpha',17,'Active',3]")
+    .replaceAll('A1:B5','A1:D5')
+    .replace("let formats=", "window.changePriority=()=>{values[1][3]=5;}; let formats=");
+  const cloud=[];
+  const {page,errors}=await fixture(t,mock,payload=>{
+    cloud.push(payload);
+    return {reply:'Hello.',intent:'none',option:'default',finding:-1};
+  });
+  const q=page.getByRole('textbox',{name:'Workbook question'});
+  const send=page.getByRole('button',{name:'Send',exact:true});
+  await q.fill('Rank "Unit" by total "Hours" where "Phase" = "Active" and "Priority" >= 2');
+  await send.click();
+  await page.getByText('Highest total Hours: Alpha · 29',{exact:false}).waitFor();
+  assert.deepEqual(await page.locator('.ranking-table tbody tr').allTextContents(),['1Alpha292','2Beta211']);
+  await page.getByRole('button',{name:'Alpha',exact:true}).click();
+  await page.getByText('Monthly!C2 (Phase) = "Active" · Monthly!D2 (Priority) = 2',{exact:false}).waitFor();
+  await page.getByText('Monthly!A5 · Alpha / Monthly!B5 = 17',{exact:true}).waitFor();
+  await page.evaluate(()=>window.changePriority());
+  await page.getByRole('button',{name:'Alpha',exact:true}).click();
+  await page.getByText('The source cells changed',{exact:false}).waitFor();
+  assert.deepEqual(cloud,[]);
+  await openView(page,'Settings');
+  await page.getByRole('checkbox',{name:'Allow AI data sharing for this session'}).check();
+  await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+  await q.fill('Hello');await send.click();
+  await page.getByText('Hello.',{exact:true}).waitFor();
+  assert.equal(cloud.length,1);
+  assert.deepEqual(cloud[0].conversation,[]);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+  assert.deepEqual(errors,[]);
+});

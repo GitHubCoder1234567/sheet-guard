@@ -1,11 +1,15 @@
 import {a1, datasetColumns, summariseBy} from './engine.mjs';
 import {cellRecord, explicitCurrencyCodes, rangeShape} from './workbook-data.mjs';
+import {evaluateQueryPlan} from './query-plan.mjs';
 
 export const foldLabel=value=>value.trim().replace(/\s+/gu,' ').toLowerCase();
 const numeric=value=>typeof value==='number' && Number.isFinite(value);
 
-export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}={}) {
+export function aggregationEvidence(dataset,fields,{sessionId,normalised=false,queryPlan}={}) {
   const headers=datasetColumns(dataset.values);
+  const filter=queryPlan?evaluateQueryPlan(dataset,queryPlan):null;
+  if (filter&&(fields.dimension!==filter.fields.dimension||fields.measure!==filter.fields.measure))
+    throw Error('The grouped fields do not match the conditional ranking plan.');
   const groupColumn=headers.indexOf(fields.dimension), measureColumn=headers.indexOf(fields.measure);
   if (groupColumn<0 || measureColumn<0 || groupColumn===measureColumn) throw Error('Choose distinct, existing category and measure columns.');
   const bounds=rangeShape(dataset);
@@ -15,6 +19,7 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
   let empty=0, repeatedIdRows=0;
   const cell=(r,c)=>a1(bounds.r+r,bounds.c+c);
   for (let i=1;i<bounds.rows;i++) {
+    if (filter&&!filter.rows.has(i)) continue;
     const row=dataset.values[i],errors=dataset.errors?.[i]??[];
     if (row.every(v=>v===''||v===null)) {empty++;continue;}
     const label=row[groupColumn], measure=cellRecord(dataset,bounds,i,measureColumn), value=measure.raw;
@@ -22,7 +27,7 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
     const record={id:dataset.sheetId+'!'+cell(i,groupColumn),sourceRow:bounds.r+i+1,
       label,value,groupCell:cell(i,groupColumn),measureCell:cell(i,measureColumn),
       identifier:id===null||id===''?null:id,identifierCell:idColumn>=0?cell(i,idColumn):null,
-      displayed:measure.displayed,format:measure.format};
+      displayed:measure.displayed,format:measure.format,...(filter?{filterCells:filter.rows.get(i)}:{})};
     if (id!==null&&id!=='') {
       if (knownIds.has(id)) repeatedIdRows++;
       knownIds.set(id,true);
@@ -44,6 +49,8 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
       names.get(label).push(record);
     }
   }
+  if (filter&&records.length+excluded.length+empty+filter.unmatched+filter.untyped!==bounds.rows-1)
+    throw Error('The filter and aggregation did not account for every source row.');
   const currencyCodes=explicitCurrencyCodes(records.map(r=>r.format));
   if (currencyCodes.length>1)
     throw Error('The measure has more than one currency format. Select a single-currency range or a converted column.');
@@ -65,7 +72,8 @@ export function aggregationEvidence(dataset,fields,{sessionId,normalised=false}=
       groupTypes:[...new Set(records.map(r=>typeof r.label))],measureType:'number'},
     coverage:'full requested range',scope:{includesHiddenAndFilteredRows:true,sampled:false},
     counts:{included:records.length,excluded:excluded.length,empty,repeatedIdRows},reasons,groups,variants,excluded,
-    signature:JSON.stringify([source,fields,records,excluded,empty])};
+    ...(filter?{queryPlan,filter:{condition:filter.condition,unmatched:filter.unmatched,untyped:filter.untyped}}:{}),
+    signature:JSON.stringify([source,fields,records,excluded,empty,filter?.signature??null])};
 }
 
 export function sameEvidence(previous,next) {

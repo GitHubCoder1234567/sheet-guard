@@ -53,6 +53,7 @@ The candidate has completed automated testing. Live Excel and staging verificati
 | formula-inspection | In a copy, enter =C5+C6 and select the formula cell. Ask “Explain this formula.” Verify the expression, current result of 70 and its references. |
 | cross-sheet | In Compare, capture the sample on two sheets. Change one amount on the second sheet and compare by Record ID. Expect one changed record. |
 | ai-conversation | With consent enabled and a configured staging password, ask an ordinary question. Confirm the response addresses it. |
+| conditional-ranking | Open the Work orders fixture. Select B4:E12 and ask `Rank "Workshop" by total "Hours" where "State" = "Open" and "Priority" >= 2`. Expect Forge 17, Assembly 11, Packing 5. Open Forge and confirm C5, C7 and C11 contributed. Change E5 from 2 to 4 and reopen the old Forge evidence. Expect an explanation that the source changed even though the total would be the same. |
 | evidence-followup | Ask for the records behind the East total after the ranking. Verify the two rows and exact source references. |
 | quality-audit | In a copy, add a duplicated record and a formula error. Run Audit and verify the observed findings and source area shown. |
 | recovery | After a missing-sheet or stale-source error, choose the valid input again. Repeat the read and check that it succeeds. |

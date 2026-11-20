@@ -54,3 +54,9 @@ The fixture is `tests/fixtures/sales-audit.json`. Include `tests/evidence.test.m
 Use **Settings → Diagnostics** to verify workbook access and export a safe report. The optional live Groq check sends a synthetic greeting through the server. Diagnostics omit workbook names, ranges, cell contents and passwords. The `/health` response includes the hosted build identifier when Render supplies it.
 
 Run `sh tools/verify.sh` with Node, Python 3, OpenSSL and Playwright. Set `CHROMIUM_EXECUTABLE` if using an existing Chromium installation. Run `node tools/benchmark.mjs` for the in-memory synthetic benchmark. See the [architecture audit](docs/reliability-audit.md), [release evidence and known limits](docs/reliability-foundation-release.md), and [Excel host verification and rollback procedure](docs/real-excel-validation.md).
+
+### Conditional rankings
+
+Select a dataset with its header row and ask `Rank "Team" by total "Hours" where "Status" = "Open" and "Priority" >= 2`. Use exact headers. The result shows ranked totals and lets you inspect contributing measure and filter cells. Text comparisons are case-sensitive. Numeric filters compare underlying Excel numbers. The plan supports up to four conditions joined by `and` and runs entirely inside the add-in.
+
+See the [Forma 5.0 roadmap](docs/forma-5-roadmap.md) and [verification report](docs/forma-5-conditional-analysis.md).
