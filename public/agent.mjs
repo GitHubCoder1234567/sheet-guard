@@ -1,7 +1,8 @@
+import {executeStatisticsPlan} from './statistics-plan.mjs';
 import {aggregationEvidence} from './evidence.mjs';
 import {a1, datasetColumns, formula, formulaReferences, profile, rect, summariseBy, DATASET_CELL_LIMIT} from './engine.mjs';
 
-const tools=new Set(['InspectWorkbook','InspectWorksheet','InspectRange','AnalyseColumn','AggregateData',
+const tools=new Set(['InspectWorkbook','InspectWorksheet','InspectRange','AnalyseColumn','AggregateData','CompareColumnTotals',
   'FindDuplicates','AnalyseFormulas','CompareDatasets','GenerateChartProposal','GenerateFormattingProposal',
   'GenerateDashboardProposal','ExplainFormula']);
 const operations=new Set(['count','total','highest','lowest']);
@@ -103,6 +104,12 @@ function analyseColumn(call,d) {
 export async function executeTool(call,context) {
   const target=toolTarget(call,context.sheets,context.selection);
   switch (call.tool) {
+    case 'CompareColumnTotals': {
+      if (call.sheet||call.address) throw Error('Select the full dataset in Excel before comparing column totals.');
+      const plan={kind:'derived-total',operation:call.operation,numerator:call.measure,denominator:call.dimension};
+      const statistics=await executeStatisticsPlan(plan,()=>context.readDataset(null,true));
+      return {statistics,local:'Column totals in '+statistics.identity.sheet+'!'+statistics.identity.address+'.'};
+    }
     case 'AggregateData': case 'FindDuplicates': case 'AnalyseColumn': {
       const dataset=await context.readDataset(target?.address?target:null,context.detailed&&call.tool==='AggregateData');
       if (call.tool==='AggregateData' && context.detailed && call.measure && call.dimension &&
@@ -155,6 +162,12 @@ export function calculationRequired(question) {
 }
 
 export function calculationGoal(question) {
+  if (!/^\s*(?:how (?:do|can|should) i|what (?:does|is) (?:a |the definition of )|explain (?:how|what)|write (?:an? )?(?:excel )?formula)\b/i.test(question) &&
+      /\b(?:total|totals|summed|combined)\b/i.test(question) && /\b(?:ratio|percentage|percent)\b/i.test(question)) {
+    if (/\b(?:where|excluding|filtered|by group|last year|this year|change|increase|decrease|per row)\b/i.test(question))
+      return 'unsupported';
+    return /\b(?:percent|percentage)\b/i.test(question)?'percentage':'ratio';
+  }
   if (!calculationRequired(question)) return null;
   if (/\b(?:median|standard deviation|percentile)\b/i.test(question)) return 'unsupported';
   if (/\b(?:rank|highest|lowest)\b/i.test(question)) return 'ranking';
@@ -164,6 +177,7 @@ export function calculationGoal(question) {
 }
 
 export function calculatesGoal(goal,plan) {
+  if (goal==='ratio'||goal==='percentage') return plan.tool==='CompareColumnTotals'&&plan.operation===goal&&!!plan.measure&&!!plan.dimension;
   if (goal==='ranking') return plan.tool==='AggregateData' && !!plan.measure && !!plan.dimension &&
     ['highest','lowest','total'].includes(plan.operation);
   if (goal==='count') return plan.tool==='AggregateData' && plan.operation==='count';

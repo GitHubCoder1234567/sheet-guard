@@ -11,9 +11,9 @@ This tracks the 31 sections of the Forma 5.0 specification against the staged re
 | 5 | Excel access | **I U M** Central host error translation, worksheet ID/name checks, selection, explicit table and workbook name targets, bounded data and formula reads, navigation, supported edits and charts. **P U M** Host capability tests, stale/protection handling and typed failure outcomes. | **N** Uniform operation-ID result envelopes across all adapter methods, same-operation concurrency guarantees, and live host coverage. |
 | 6 | Shared data model | **I U M** Raw/displayed value, Excel type, formula when requested, format, coordinates, and typed blank/error semantics. **P U M** Shared snapshots for all analytical paths and recognizing explicit currency codes. | **N** Reliable locale-aware conversion, units, time/date semantics, workbook identity beyond the session, and complete dataset identity. |
 | 7 | General tool engine | **I U M** Enumerate/inspect, read, formula and duplicate checks, filtering/grouping/ranking, statistics, compare, chart/edit proposals, approved applies and scoped undo. **P U M** Quality validation, reconciliation and structured error/evidence contracts. | **N** General typed sort and join tools, materialized results and composable provenance across every tool. |
-| 8 | Query planning | **I U M** Conditional rankings and multiple column statistics compose target resolution, bounded reads, validated operations and evidence. **P U M** Existing hosted allowlisted two-step planning and completion checks. | **N** General dependency graph, multi-result composition and verified period-change explanations. |
+| 8 | Query planning | **I U M** Conditional rankings and multiple column statistics compose target resolution, bounded reads, validated operations and evidence. **P U M** Existing hosted allowlisted two-step planning and completion checks. | **P U M** Bounded calculation graph with shared intermediate sums, two-input ratios and percentages. General relational operators, flexible composition and verified period-change explanations remain open. |
 | 9 | Multi-turn conversation | **I U M** Session-local ranking follow-up, evidence replay, refinement and scoped edit history. **P U M** Hosted short history and ambiguous-reference handling. | **N** Reusable multi-result filters, periods and sorting across turns. |
-| 10 | Deterministic analytics | **I U M** Sum, average, numeric and non-empty counts, min/max/median, distinct count, grouped rankings and AND-filtered totals. **P U M** Cross-sheet comparison, key reconciliation and pivot-style summaries. | **N** General ratios/percentages, variance/deviation, running and moving statistics, period comparison, robust outlier and general sort operations. |
+| 10 | Deterministic analytics | **I U M** Sum, average, numeric and non-empty counts, min/max/median, distinct count, grouped rankings and AND-filtered totals. **P U M** Cross-sheet comparison, key reconciliation and pivot-style summaries. | **I U M** Ratio and percentage of two column totals with aligned numeric rows. **N** Grouped, period and row-wise comparisons, variance/deviation, running and moving statistics, period comparison, robust outlier and general sort operations. |
 | 11 | Calculation provenance | **I U M** Exact group, measure, predicate cells, repeated identifiers when available, exclusion counts and stale replay for rankings. **I U M** Composed statistics replay with exact contributing cells. **P U M** Legacy single-statistic and cross-sheet evidence coverage. | **N** Complete contracts for edits, joins, scenarios, units, arbitrary follow-up and every analytical result. |
 | 12 | Groq integration | **I U M** Existing configured model path, strict structured outputs, bounded retries, provider and network error classification, privacy-safe logs, local verified results after 502. **P U M** Model compatibility. | Live configured-model tests for the exact candidate, richer plan validation and incident review. |
 | 13 | Formula intelligence | **I U M** Selected formula display, references, current result and Excel errors. **P U M** Formula pattern checks and safe eligible repairs. | **N** Comprehensive dependency graphs, intended-reference inference, and efficiency analysis. |
@@ -45,10 +45,10 @@ This tracks the 31 sections of the Forma 5.0 specification against the staged re
 | 3 | Centralized Excel adapter | **P U M** Shared resolution and reads. Uniform envelopes remain pending |
 | 4 | Universal discovery | **P U M** Fresh bounded discovery and explicit objects. Complex layout inference remains pending |
 | 5 | Shared data model | **P U M** Typed cells and sources. Locale and units remain pending |
-| 6 | General tools | **P U M** Selected operations. General composition and joins remain pending |
-| 7 | Intelligent planner | **P U M** Conditional analytical flow, limited hosted planner |
-| 8 | Deterministic engine | **P U M** Basic statistics and ranked, filtered sums |
-| 9 | Provenance | **P U M** Ranking ledger and sample key evidence |
+| 6 | General tools | **P U M** Statistics plus two-input comparisons. General composition and joins remain pending |
+| 7 | Intelligent planner | **P U M** Conditional analytical flow, validated scalar graph and limited hosted planner |
+| 8 | Deterministic engine | **P U M** Basic statistics, ratios of column totals and ranked, filtered sums |
+| 9 | Provenance | **P U M** Ranking ledger, independently replayed ratio operands and sample key evidence |
 | 10 | Conversational memory | **P U M** Session-local evidence and bounded history |
 | 11 | Groq integration | **P U M** Provider validation and retries. Live candidate probe remains pending |
 | 12 | Formula tools | **P U M** Basic references, patterns and errors |
@@ -78,7 +78,7 @@ This tracks the 31 sections of the Forma 5.0 specification against the staged re
 
 PR #6 targets the reliability foundation branch from PR #5. PR #7 targets the PR #6 branch. GitHub comparison confirmed that PR #7 contains one additional commit above the head of PR #6 and is zero commits behind it as reviewed. The relationship module is independently testable, but its app integration, test changes and host gate share files and ancestry with PR #6.
 
-Review in order #5, #6, #7, then the resource-planning and composed-statistics increments. Assemble on a development integration branch. If using squash or rebasing, replay each child’s own delta onto the new parent and check that the resulting PR diff shows only its intended files. After assembling the stack, run the full suite and verify the published candidate commit in isolated Excel and Groq tests. A staging or production promotion remains a separate approval.
+The integration branch descends from #5 `223e914`, #6 `ff48b5f`, #7 `d3a0e54`, #8 `31b050e` and #9 `b5502d8` in that order. Review each diff against its parent. Assemble on a development integration branch. If using squash or rebasing, replay each child’s own delta onto the new parent and check that the resulting PR diff shows only its intended files. After assembling the stack, run the full suite and verify the published candidate commit in isolated Excel and Groq tests. A staging or production promotion remains a separate approval.
 
 ## Core requirement detail
 
@@ -95,7 +95,7 @@ Review in order #5, #6, #7, then the resource-planning and composed-statistics i
 | 5 | Stale or removed resources, protection, hidden state, unsupported and partial data | **I U M** for tested isolated failure cases. Concurrent edits and platform coverage remain partial |
 | 5 | Operation ID, returned and resolved resources, execution status and safe diagnostic envelopes for all operations | **P U M** Common classified errors. Uniform envelopes and operation IDs remain pending |
 | 8 | Recognize intent, bind dataset and fields, validate allowed plan | **P U M** Local typed patterns and existing provider schema |
-| 8 | Execute dependent operations, verify results, combine outputs and render | **I U M** for targeted ranking and same-column statistics. General execution graph remains pending |
+| 8 | Execute dependent operations, verify results, combine outputs and render | **I U M** for targeted ranking and same-column statistics. Dependent totals use a bounded graph with validated references and operand types. General relational composition remains pending |
 | 8 | Reuse verified results across turns and explain period changes | **P U M** Ranking follow-ups and statistic evidence replay. General multi-result memory, period logic and causal explanations remain pending |
 | 11 | Exact source, contributors, exclusions, operation, filters and stale checks | **I U M** for rankings and composed statistics within their documented scope |
 | 11 | Units, original formula dependencies, efficient provenance across every tool | **P U M** Explicit format codes and local storage. Full unit and formula provenance remains pending |
