@@ -1,3 +1,4 @@
+import {conditionalQuery} from './query-plan.mjs';
 import {calculateColumn} from './calculation.mjs';
 import {runDiagnostics, runLightDiagnostics} from './diagnostics.mjs';
 import {discoverRegions, chooseDiscoveredRegion} from './discovery.mjs';
@@ -591,6 +592,18 @@ function chatView() {
       setTab('History');
       return;
     }
+    const conditional=conditionalQuery(q);
+    if (conditional) {
+      run(()=>submitQuestion(q,async()=>{
+        if (conditional.error) throw Error(conditional.error);
+        const data=await captureDataset(undefined,true,true);
+        const queryPlan=conditional.plan;
+        const report=rankedAnalysis({dimension:queryPlan.group,measure:queryPlan.measure,queryPlan,sessionId:state.sessionId},data);
+        state.evidence=report.evidence;state.evidenceGroup=report.groups[0].label;
+        state.messages.push({role:'assistant',text:report.text,report});
+      },{localOnly:true}),'Reading and filtering the selected data…');
+      return;
+    }
     const numericRequest=/^(?:calculate (?:the )?)?(sum|average|minimum|maximum|median|numeric count|non-empty count|distinct count) of (.+) in (?:the |this |my )?selection[.!?]?$/i.exec(q);
     if (numericRequest) {
       run(()=>submitQuestion(q,()=>answerColumn(numericRequest[1].toLowerCase(),numericRequest[2])),'Reading selected column…');
@@ -651,6 +664,8 @@ function evidenceRows(message) {
     const label=(row.groupCell?message.sheet+'!'+row.groupCell+' · '+row.label+' / ':'')+
       message.sheet+'!'+row.measureCell+' = '+row.value;
     section.append(node('p',label+(row.identifier===null?'':' · '+row.identifierCell+' '+row.identifier)));
+    if (row.filterCells?.length) section.append(node('p',row.filterCells.map(cell=>
+      message.sheet+'!'+cell.address+' ('+cell.field+') = '+JSON.stringify(cell.value)).join(' · '),'muted'));
     if (row.displayed!==null && row.displayed!==String(row.value))
       section.append(node('p','Displayed in Excel: '+row.displayed,'muted'));
     section.append(
@@ -691,10 +706,12 @@ async function answerColumn(operation,column) {
 async function answerEvidence(question,kind,exactGroup) {
   const prior=state.evidence;
   if (!prior || prior.sessionId!==state.sessionId) throw Error('Calculate the category totals first so Forma can identify their source rows.');
-  const {source,fields}=prior;
+  const {source,fields,queryPlan}=prior;
+  if (queryPlan&&kind!=='records')
+    throw Error('This filtered ranking supports source records. Run an unfiltered ranking before changing the grouping or proposing edits.');
   const target=source.table?{sheetId:source.sheetId,table:source.table}:{sheetId:source.sheetId,address:source.address};
   const data=await captureDataset(target,false,true);
-  const current=aggregationEvidence(data,fields,{sessionId:state.sessionId,normalised:prior.grouping!=='exact label'});
+  const current=aggregationEvidence(data,fields,{sessionId:state.sessionId,normalised:prior.grouping!=='exact label',queryPlan});
   if (!sameEvidence(prior,current)) {
     state.evidence=null;
     throw Error('The source cells changed since the previous calculation. Run the ranking again before using its totals or proposing edits.');
@@ -846,11 +863,12 @@ async function preparePivot(question) {
   return '';
 }
 
-async function submitQuestion(question,work) {
+async function submitQuestion(question,work,{localOnly=false}={}) {
   state.chatError='';
-  const conversation=state.messages.filter(m=>!m.failed&&!m.report&&!m.rows).slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
+  const conversation=state.messages.filter(m=>!m.failed&&!m.report&&!m.rows&&!m.localOnly).slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
   const previous=state.messages.at(-1);
   const turn=previous?.failed && previous.text===question?previous:{role:'user',text:question};
+  if (localOnly) turn.localOnly=true;
   if (turn!==previous) state.messages.push(turn);
   try {
     const status=await work(conversation);

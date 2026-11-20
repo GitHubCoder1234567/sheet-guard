@@ -6,7 +6,7 @@ export const scenarios = [
   'named-range', 'ambiguous-data', 'typed-values', 'sales-ranking', 'column-calculation',
   'source-selection', 'formula-errors', 'provider-probe', 'provider-fallback', 'report-privacy',
   'preview-cancel', 'stale-preview', 'apply-and-undo', 'protected-sheet', 'large-range',
-  'discovery', 'formula-inspection', 'cross-sheet', 'ai-conversation', 'evidence-followup',
+  'discovery', 'formula-inspection', 'cross-sheet', 'ai-conversation', 'evidence-followup', 'conditional-ranking',
   'quality-audit', 'recovery', 'unsupported-api',
 ];
 const hosts = ['Excel Web', 'Excel Windows', 'Excel Mac'];
