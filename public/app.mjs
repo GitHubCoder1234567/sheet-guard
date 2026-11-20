@@ -1,3 +1,4 @@
+import {inspectKeyRelationship} from './relationships.mjs';
 import {conditionalQuery} from './query-plan.mjs';
 import {calculateColumn} from './calculation.mjs';
 import {runDiagnostics, runLightDiagnostics} from './diagnostics.mjs';
@@ -803,6 +804,57 @@ async function captureDataset(target,expand=false,evidence=false) {
     },target,expand,evidence);
   } finally {state.datasetController=null;}
 }
+function relationshipPanel(view) {
+  const summary=node('details');summary.open=!!view.relationshipOpen;
+  summary.append(node('summary','Inspect key relationships'));
+  summary.addEventListener('toggle',()=>{if(summary.isConnected) view.relationshipOpen=summary.open;});
+  const columns=[['first','First key'],['second','Second key']];
+  for (const [side,label] of columns) {
+    const key=side+'Key';
+    const headers=datasetColumns(view[side].values);
+    const input=select([['','Choose a key column'],...headers.map(h=>[h,h])],view[key]??'');
+    input.setAttribute('aria-label',label);
+    input.addEventListener('change',()=>{
+      view.relationshipOpen=summary.open;view[key]=input.value;view.relationship=null;render();
+    });
+    summary.append(field(label,input));
+  }
+  summary.append(button('Check relationships',()=>run(async()=>{
+    view.relationship=inspectKeyRelationship(view.first,view.second,{firstKey:view.firstKey,secondKey:view.secondKey});
+    return 'Key relationships checked.';
+  },'Checking the captured keys…'),{enabled:!!(view.firstKey&&view.secondKey)}));
+  const report=view.relationship;
+  if (!report) return summary;
+  const labels={oneToOne:'One to one',oneToMany:'One to many',manyToOne:'Many to one',
+    manyToMany:'Many to many',firstOnly:'First only',secondOnly:'Second only'};
+  summary.append(node('p',report.matchingPairs.toLocaleString()+' row pairs would match in an inner join.'));
+  if (report.counts.manyToMany) summary.append(node('p','Many-to-many keys would multiply records. Review duplicate key cells before joining.','chat-error'));
+  for (const [side,label] of columns) {
+    const value=report[side];
+    summary.append(node('p',label+' · '+value.source.sheet+'!'+value.source.range+
+      ' · '+value.unmatched+' unmatched rows · '+value.duplicated+' duplicate keys · '+
+      value.missing+' missing and '+value.invalid+' invalid key cells','muted'));
+  }
+  const detail=node('details');
+  detail.append(node('summary','Sample key cells'));
+  for (const [kind,label] of Object.entries(labels)) {
+    summary.append(node('p',label+' · '+report.counts[kind]+' keys'));
+    if (!report.counts[kind]) continue;
+    detail.append(node('h4',label));
+    for (const example of report.examples[kind]) {
+      const sides=['first','second'].flatMap(side=>{
+        const entry=example[side];
+        if (!entry) return [];
+        const sheet=report[side].source.sheet;
+        return [entry.addresses.map(cell=>sheet+'!'+cell).join(', ')+
+          (entry.count>entry.addresses.length?' (first '+entry.addresses.length+' of '+entry.count+')':'')];
+      });
+      detail.append(node('p',JSON.stringify(example.value)+' · '+sides.join(' ↔ ')));
+    }
+  }
+  summary.append(node('p','Exact typed keys in the captured snapshots. Recapture each range after editing or moving its data.','muted'),detail);
+  return summary;
+}
 function comparisonPanel() {
   const view=state.comparison;
   const panel=block(node('h2','Compare datasets'),node('p','In Excel, select the first range including its headers, capture it, then repeat for the second range.'));
@@ -810,15 +862,16 @@ function comparisonPanel() {
     panel.append(button('Capture '+label.toLowerCase()+' selection',()=>run(async()=>{
       const dataset=await captureDataset();
       datasetColumns(dataset.values);
-      view[key]=dataset;view.result=null;
+      view[key]=dataset;view.result=null;view.relationship=null;view[key+'Key']='';
       return label+' selection captured.';
     },'Reading selection…')));
     if (view[key]) panel.append(node('p',view[key].sheet+'!'+view[key].address+' · '+(view[key].values.length-1)+' data rows','address'));
   }
   if (!view.first || !view.second) return panel;
+  panel.append(relationshipPanel(view));
   const right=new Set(datasetColumns(view.second.values).map(v=>v.toLowerCase()));
   const options=datasetColumns(view.first.values).filter(v=>right.has(v.toLowerCase()));
-  if (!options.length) {panel.append(node('p','The captures need a shared identifier column header.'));return panel;}
+  if (!options.length) {panel.append(node('p','To compare field values, capture ranges with a shared key header. You can inspect differently named keys above.'));return panel;}
   const key=select([['','Choose a matching column'],...options.map(v=>[v,v])],view.key??'');
   key.addEventListener('change',()=>{view.key=key.value;view.result=null;render();});
   panel.append(field('Match records by',key),button('Compare records',()=>run(async()=>{
