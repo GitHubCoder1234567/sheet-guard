@@ -567,3 +567,23 @@ test('worksheet discovery reads fresh cells and reports the same worksheet ident
   await page.getByText('Utilization · numeric measure candidate',{exact:true}).waitFor();
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
 });
+
+test('one statistics question runs multiple verified tools and refuses stale source rows',async t=>{
+  const office=workbookDouble.replace('let formats=','window.changeValues=()=>{values[1][1]=13;values[2][1]=17;};let formats=');
+  let requests=0;
+  const {page,errors}=await fixture(t,office,()=>{requests++;return {status:500};});
+  await page.getByRole('textbox',{name:'Workbook question'}).fill(
+    'Calculate sum, average and numeric count of "Revenue" in the selection');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByText('sum · 78 · 4 included, 0 excluded',{exact:true}).waitFor();
+  await page.getByText('average · 19.5 · 4 included, 0 excluded',{exact:true}).waitFor();
+  await page.getByText('numeric count · 4 · 4 included, 0 excluded',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Sources for average',exact:true}).click();
+  await page.getByText('Monthly!B2 = 12',{exact:true}).waitFor();
+  await page.evaluate(()=>window.changeValues());
+  await page.getByRole('button',{name:'Sources for sum',exact:true}).click();
+  await page.getByText('The source snapshot changed.',{exact:false}).waitFor();
+  assert.equal(requests,0);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+  assert.deepEqual(errors,[]);
+});

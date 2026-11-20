@@ -20,7 +20,8 @@ Baseline is the existing reliability foundation, commit 223e914cd830 and draft P
 - [x] Read fresh worksheet profiles and resolve explicit table, workbook range name and worksheet targets in conditional plans.
 - [ ] Extend workbook discovery for complex layouts, filters, hidden rows and relationships on supported hosts.
 - [x] Profile exact typed keys across two captures and report relationship cardinality and potential join expansion.
-- [ ] Extend composable analytics to materialized joins, period comparisons, statistics and additional evidence-backed follow-ups.
+- [x] Combine up to four validated statistics on one captured source and replay evidence independently.
+- [ ] Extend composable analytics to materialized joins, period comparisons and broader evidence-backed follow-ups.
 - [ ] Expand Groq plan validation and run the configured model against synthetic inputs.
 - [ ] Expand formula, data-quality, preview and undo coverage without weakening approval safeguards.
 - [x] Generate starter and holdout packs with independently checked native worksheet scenarios.

@@ -9,6 +9,7 @@ const request=new RegExp(String.raw`^(?:rank (${fieldToken}) by (?:the )?total (
 const predicate=new RegExp(String.raw`^\s*(${quoted})\s*(<=|>=|!=|=|<|>)\s*(${literal})(?=\s+and\s+|\s*$)`,'i');
 const scope=new RegExp(String.raw`\s+in (table|named range|worksheet) (${quoted})$`,'i');
 const scopeKeys={table:'table','named range':'namedRange',worksheet:'worksheet'};
+export const quotedHeader=quoted;
 const quotedField=new RegExp('^'+quoted+'$');
 const operators=new Set(['=','!=','>','<','>=','<=']);
 const fieldLimit=255;
@@ -22,6 +23,12 @@ function fieldPart(value) {
   return JSON.parse(trimmed);
 }
 
+export function splitScope(text) {
+  const match=scope.exec(text);
+  return match?{head:text.slice(0,match.index),
+    target:{[scopeKeys[match[1].toLowerCase()]]:JSON.parse(match[2])}}:{head:text};
+}
+
 export function conditionalQuery(question) {
   const q=question.trim().replace(/^please\s+/i,'').replace(/[.!?]$/,'');
   if (!/^(?:rank |(?:calculate |show (?:me )?)?(?:total|sum of) )/i.test(q)||!/\swhere\s/i.test(q)) return null;
@@ -30,9 +37,8 @@ export function conditionalQuery(question) {
     if (!match) throw Error(example);
     const [,group,measure,alternateMeasure,alternateGroup,where]=match;
     const filters=[];
-    const requestedSource=scope.exec(where);
-    const target=requestedSource?{[scopeKeys[requestedSource[1].toLowerCase()]]:JSON.parse(requestedSource[2])}:null;
-    let rest=requestedSource?where.slice(0,requestedSource.index):where;
+    const {head,target}=splitScope(where);
+    let rest=head;
     while (rest) {
       const item=predicate.exec(rest);
       if (!item || filters.length===filterLimit) throw Error(example);
@@ -48,22 +54,24 @@ export function conditionalQuery(question) {
   } catch {return {error:example};}
 }
 
-function exactKeys(object,keys) {
+export function exactKeys(object,keys) {
   return object&&typeof object==='object'&&Object.keys(object).length===keys.length&&keys.every(k=>Object.hasOwn(object,k));
 }
-const fieldName=value=>typeof value==='string'&&value.trim().length>0&&value.length<=fieldLimit;
+export const fieldName=value=>typeof value==='string'&&value.trim().length>0&&value.length<=fieldLimit;
+
+export function planKeys(plan,keys) {
+  if (plan?.target===undefined) return keys;
+  const key=Object.values(scopeKeys).find(k=>exactKeys(plan.target,[k]));
+  if (!key||!fieldName(plan.target[key])) throw Error('The dataset source is invalid.');
+  return [...keys,'target'];
+}
 
 function validateQueryPlan(plan) {
-  const keys=['kind','group','measure','filters'];
-  if (plan?.target!==undefined) keys.push('target');
+  const keys=planKeys(plan,['kind','group','measure','filters']);
   if (!exactKeys(plan,keys)||plan.kind!=='conditional-ranking'||
       !fieldName(plan.group)||!fieldName(plan.measure)||!Array.isArray(plan.filters)||
       plan.filters.length<1||plan.filters.length>filterLimit)
     throw Error('The conditional ranking plan is invalid.');
-  if (keys.includes('target')) {
-    const key=Object.values(scopeKeys).find(k=>exactKeys(plan.target,[k]));
-    if (!key||!fieldName(plan.target[key])) throw Error('The dataset source is invalid.');
-  }
   for (const filter of plan.filters) {
     if (!exactKeys(filter,['field','op','value'])||!fieldName(filter.field)||!operators.has(filter.op))
       throw Error('The filter plan is invalid.');
@@ -115,9 +123,13 @@ export function evaluateQueryPlan(dataset,plan) {
 // Resolve the source before binding columns and evaluating any analytical step.
 export async function readPlannedDataset(plan,readDataset) {
   validateQueryPlan(plan);
-  const dataset=await readDataset(plan.target,!plan.target,true);
-  if (dataset.partial) throw Error('Conditional ranking requires the full requested range.');
-  if (!plan.target?.worksheet) return dataset;
+  return readDatasetScope(plan.target,readDataset);
+}
+
+export async function readDatasetScope(target,readDataset) {
+  const dataset=await readDataset(target,!target,true);
+  if (dataset.partial) throw Error('Analysis requires the full requested range.');
+  if (!target?.worksheet) return dataset;
   const region=chooseDiscoveredRegion(dataset);
   if (!region) throw Error('Forma could not identify one dataset on the requested worksheet. Use an Excel table, a workbook-scoped named range, or select the header and data.');
   return region;

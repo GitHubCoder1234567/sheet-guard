@@ -62,3 +62,5 @@ Select a dataset with its header row and ask `Rank "Team" by total "Hours" where
 See the [Forma 5.0 roadmap](docs/forma-5-roadmap.md) and [verification report](docs/forma-5-conditional-analysis.md).
 
 Append `in table "Actuals"`, `in named range "CurrentData"`, or `in worksheet "Operations"` to target a source without changing the selection. A worksheet request requires a single unambiguous dataset. Use **Audit → Discover worksheet datasets** for a fresh profile of the active sheet. See the [31-section completion matrix](docs/forma-5-completion-matrix.md).
+
+Use `Calculate sum and average of "Hours" in table "Schedule"` to run up to four supported statistics on the same source. The task pane shows each result and its included and excluded counts. Choose a result’s source button to verify its contributing cells against the workbook.

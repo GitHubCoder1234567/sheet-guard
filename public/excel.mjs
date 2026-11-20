@@ -653,7 +653,7 @@ async function datasetTarget(ctx,target,mode) {
   if (mode==='address') return {sheet,range:sheet.getRange(target.address)};
   if (mode==='table') {
     const tables=sheet?sheet.tables:ctx.workbook.tables;
-    if (!tables?.getItemOrNullObject) throw new WorkbookError('unsupported','resolve table','This host cannot resolve Excel table names.');
+    if ((!sheet&&!supported('1.4'))||!tables?.getItemOrNullObject) throw new WorkbookError('unsupported','resolve table','This host cannot resolve Excel table names.');
     return tableSource(ctx,sheet,tables.getItemOrNullObject(target.table));
   }
   const names=ctx.workbook.names;

@@ -38,6 +38,7 @@ The candidate has completed automated testing. Live Excel and staging verificati
 | typed-values | In a copy, replace C8 with text entered as apostrophe-4. Ask for the sum of Total Sales in the selection. Expect 87 with one excluded numeric text entry. |
 | sales-ranking | Ask “Analyse the Sales Audit worksheet. Rank every product category by total sales. Show the exact cells used for each calculation.” Expect East 47 from C5 and C7, West 36 from C6 and C8, in that order. |
 | column-calculation | Select B4:D8 and ask “Calculate the median of Total Sales in the selection”. Expect 23.5 with C5 through C8 as contributors. |
+| composed-statistics | Select B4:D8 in Sales Audit. Ask `Calculate sum, average and numeric count of "Total Sales" in the selection`. Expect 83, 20.75 and 4. Open sum sources and verify C5:C8. Change C5 from 30 to 31 and C6 from 40 to 39, then reopen the old sources. Forma should report a stale snapshot even though the total remains 83. |
 | source-selection | Open the East evidence, check R1 and R3, select a cited cell, then confirm no data was edited. |
 | formula-errors | Add =1/0 to a disposable copy, select it and explicitly ask for formula errors. Expect a report of the error and its coordinate. |
 | provider-probe | Enable the optional synthetic check. Confirm Groq’s validated reply passes and that no customer data was used. |
