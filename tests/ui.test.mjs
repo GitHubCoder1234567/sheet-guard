@@ -507,3 +507,29 @@ test('conditional ranking stays local and visibly rechecks original measure and 
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
   assert.deepEqual(errors,[]);
 });
+
+test('cross-sheet key inspection warns about record multiplication without writing or calling AI',async t=>{
+  const office=workbookDouble.replace("const values = [['Month','Revenue'],['January',12],['February',18],['March',22],['April',26]];",
+    "let values=[['Order key','Time'],['X',12],['X',18],['Y',22],['Left',26]];")
+    .replace("const book = {","window.showOther=()=>{sheet.id='other-sheet';sheet.name='Shipments';"+
+      "values=[['Dispatch key','Status'],['X','Open'],['X','Done'],['Y','Open'],['Right','Done']];}; const book = {");
+  let requests=0;
+  const {page,errors}=await fixture(t,office,()=>{requests++;return {status:500};});
+  await page.getByRole('button',{name:'Compare datasets',exact:true}).click();
+  await page.getByRole('button',{name:'Capture first selection',exact:true}).click();
+  await page.getByText('Monthly!A1:B5 · 4 data rows',{exact:true}).waitFor();
+  await page.evaluate(()=>window.showOther());
+  await page.getByRole('button',{name:'Capture second selection',exact:true}).click();
+  await page.getByText('Shipments!A1:B5 · 4 data rows',{exact:true}).waitFor();
+  await page.getByText('Inspect key relationships',{exact:true}).click();
+  await page.getByLabel('First key',{exact:true}).selectOption('Order key');
+  await page.getByLabel('Second key',{exact:true}).selectOption('Dispatch key');
+  await page.getByRole('button',{name:'Check relationships',exact:true}).click();
+  await page.getByText('5 row pairs would match in an inner join.',{exact:true}).waitFor();
+  await page.getByText('Many-to-many keys would multiply records.',{exact:false}).waitFor();
+  await page.getByText('Sample key cells',{exact:true}).click();
+  await page.getByText('"X" · Monthly!A2, Monthly!A3 ↔ Shipments!A2, Shipments!A3',{exact:true}).waitFor();
+  assert.equal(requests,0);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+  assert.deepEqual(errors,[]);
+});

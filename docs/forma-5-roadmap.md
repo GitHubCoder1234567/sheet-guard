@@ -18,7 +18,8 @@ Baseline is the existing reliability foundation, commit 223e914cd830 and draft P
 - [x] Reuse the initial repository audit and assess the dependencies and risks for this increment.
 - [x] Execute typed conditional ranking end to end with exact source cells and stale-source detection.
 - [ ] Extend workbook discovery and metadata for tables, names, filters, hidden rows and relationships on supported hosts.
-- [ ] Extend composable analytics to joins, period comparisons, statistics and additional evidence-backed follow-ups.
+- [x] Profile exact typed keys across two captures and report relationship cardinality and potential join expansion.
+- [ ] Extend composable analytics to materialized joins, period comparisons, statistics and additional evidence-backed follow-ups.
 - [ ] Expand Groq plan validation and run the configured model against synthetic inputs.
 - [ ] Expand formula, data-quality, preview and undo coverage without weakening approval safeguards.
 - [x] Generate starter and holdout packs with independently checked native worksheet scenarios.
