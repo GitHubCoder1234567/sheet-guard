@@ -587,3 +587,43 @@ test('one statistics question runs multiple verified tools and refuses stale sou
   assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
   assert.deepEqual(errors,[]);
 });
+
+test('task pane resolves a percentage of totals and shows the numerator and denominator cells',async t=>{
+  const office=workbookDouble.replace('let formats=',"values.splice(0,5,['Settled','Submitted'],[3,10],[1,6],[0,2],[1,2]);let formats=");
+  let requests=0;
+  const {page,errors}=await fixture(t,office,()=>{requests++;return {status:500};});
+  await page.getByRole('textbox',{name:'Workbook question'}).fill(
+    'Calculate total "Settled" as a percentage of total "Submitted" in the selection');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByText('percentage · 25% · 4 included, 0 excluded',{exact:true}).waitFor();
+  await page.getByText('Sum of Settled (5) divided by sum of Submitted (20), multiplied by 100.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Sources for percentage',exact:true}).click();
+  await page.getByText('Monthly!A2 = 3',{exact:true}).waitFor();
+  await page.getByText('Monthly!B5 = 2',{exact:true}).waitFor();
+  assert.equal(requests,0);
+  assert.deepEqual(await page.evaluate(()=>window.sheetGuardTestCalls),[]);
+  assert.deepEqual(errors,[]);
+});
+
+test('paraphrased total comparison uses provider-selected fields after inspection and renders only verified arithmetic',async t=>{
+  const office=workbookDouble.replace('let formats=',"values.splice(0,5,['Accepted','Arrived'],[6,10],[2,3],[0,5],[1,2]);let formats=");
+  let hits=0;
+  const {page,errors}=await fixture(t,office,request=>{
+    hits++;
+    const base={reply:'999% estimated.',intent:'none',option:'default',finding:-1,sheet:'',address:'',measure:'',dimension:'',operation:''};
+    if (!request.toolResult) return {...base,tool:'InspectWorksheet'};
+    assert.equal(request.toolResult.calculationPending,true);
+    return {...base,tool:'CompareColumnTotals',operation:'percentage',measure:'Accepted',dimension:'Arrived'};
+  });
+  await openView(page,'Settings');
+  await page.getByRole('checkbox',{name:'Allow AI data sharing for this session'}).check();
+  await page.getByRole('button',{name:'Back to workspace',exact:true}).click();
+  await page.getByRole('textbox',{name:'Workbook question'}).fill('What percent of total arrivals did we accept across the selection?');
+  await page.getByRole('button',{name:'Send',exact:true}).click();
+  await page.getByText('percentage · 45% · 4 included, 0 excluded',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Sources for percentage',exact:true}).click();
+  await page.getByText('Monthly!A2 = 6',{exact:true}).waitFor();
+  assert.equal(await page.getByText('999% estimated.',{exact:true}).count(),0);
+  assert.equal(hits,2);
+  assert.deepEqual(errors,[]);
+});

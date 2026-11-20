@@ -183,3 +183,18 @@ test('global resources bind to the owning worksheet and never fall back to the a
   await assert.rejects(readDataset(undefined,undefined,{table:'OtherTable'}),e=>e.category==='hidden_target');
   await assert.rejects(readDataset(undefined,undefined,{worksheet:'Other worksheet'}),e=>e.category==='hidden_target');
 });
+
+test('evidence reads require complete aligned metadata and retain computed formulas for lineage',async()=>{
+  const block={load(){},values:[['Result'],[4]],valueTypes:[['String'],['Double']],
+    text:[['Result'],['4']],numberFormat:[['General'],['General']],formulas:[['Result'],['=2+2']]};
+  const sheet={id:'s',name:'Lab',visibility:'Visible',load(){},getRange:()=>block};
+  globalThis.Excel={run:work=>work({sync:async()=>{},workbook:{getSelectedRange:()=>({worksheet:sheet,load(){},
+    rowIndex:3,columnIndex:2,rowCount:2,columnCount:1})}})};
+  const read=()=>readDataset(undefined,undefined,undefined,false,true);
+  assert.deepEqual((await read()).formulas,[[null],['=2+2']]);
+  for (const field of ['values','valueTypes','text','numberFormat','formulas']) {
+    const original=block[field];block[field]=[original[0],[]];
+    await assert.rejects(read(),e=>e.category==='partial_read');
+    block[field]=original;
+  }
+});

@@ -690,7 +690,7 @@ function evidenceRows(message) {
   for (const row of rows.slice(page*size,(page+1)*size)) {
     const label=(row.groupCell?message.sheet+'!'+row.groupCell+' · '+row.label+' / ':'')+
       message.sheet+'!'+row.measureCell+' = '+row.value;
-    section.append(node('p',label+(row.identifier===null?'':' · '+row.identifierCell+' '+row.identifier)));
+    section.append(node('p',label+(row.reason?' · excluded ('+row.reason+')':'')+(row.identifier===null?'':' · '+row.identifierCell+' '+row.identifier)));
     if (row.filterCells?.length) section.append(node('p',row.filterCells.map(cell=>
       message.sheet+'!'+cell.address+' ('+cell.field+') = '+JSON.stringify(cell.value)).join(' · '),'muted'));
     if (row.displayed!==null && row.displayed!==String(row.value))
@@ -722,13 +722,20 @@ function statisticsPanel(report) {
   const section=node('section');
   for (const result of report.results) {
     const value=result.result.toLocaleString(undefined,{maximumSignificantDigits:15});
-    section.append(node('p',result.operation+' · '+value+(result.observedCurrency?' '+result.observedCurrency:'')+
+    section.append(node('p',result.operation+' · '+value+(result.operation==='percentage'?'%':'')+(result.observedCurrency?' '+result.observedCurrency:'')+
       ' · '+result.counts.included+' included, '+result.counts.excluded+' excluded'));
+    if (result.method) section.append(node('p',result.method));
     section.append(button('Sources for '+result.operation,()=>run(async()=>{
       const evidence=await replayStatisticsEvidence(report,result.operation,captureDataset);
-      const rows=evidence.contributors.map(cell=>({measureCell:cell.address,value:cell.raw,identifier:null,displayed:cell.displayed}));
-      state.messages.push({role:'assistant',text:evidence.operation+' contributors in '+evidence.source.sheet+'!'+evidence.source.range+'.',
-        rows,sheet:evidence.source.sheet,sheetId:evidence.source.sheetId});
+      for (const [index,input] of (evidence.inputs??[evidence]).entries()) {
+        const role=evidence.inputs?(index===0?'Numerator':'Denominator')+' · '+input.field+' · ':'';
+        const rows=input.contributors.map(cell=>({measureCell:cell.address,value:cell.raw,identifier:null,displayed:cell.displayed}));
+        state.messages.push({role:'assistant',text:role+input.operation+' contributors in '+input.source.sheet+'!'+input.source.range+'.',
+          rows,sheet:input.source.sheet,sheetId:input.source.sheetId});
+        if (input.excluded.length) state.messages.push({role:'assistant',text:role+'Excluded cells for '+input.field+'.',
+          rows:input.excluded.map(cell=>({measureCell:cell.address,value:cell.raw,reason:cell.reason,identifier:null,displayed:cell.displayed})),
+          sheet:input.source.sheet,sheetId:input.source.sheetId});
+      }
       return 'Source snapshot verified.';
     },'Rechecking statistic sources…')));
   }
@@ -1080,7 +1087,7 @@ async function requestAgent(payload) {
         (data.tool!==undefined && typeof data.tool!=='string'))
       throw Error('The AI service returned an invalid answer. Try asking a narrower question.');
     if (payload.toolResult && data.tool && data.tool!=='none' &&
-        !(payload.toolResult.calculationPending===true && ['AggregateData','AnalyseColumn'].includes(data.tool))) throw Error('The AI requested another tool after receiving the workbook evidence.');
+        !(payload.toolResult.calculationPending===true && ['AggregateData','AnalyseColumn','CompareColumnTotals'].includes(data.tool))) throw Error('The AI requested another tool after receiving the workbook evidence.');
     return data;
   } finally {clearTimeout(timeout);}
 }
@@ -1114,6 +1121,8 @@ async function ask(question,conversation) {
     for (let step=0;step<2 && result.tool && result.tool!=='none';step++) {
       if (requested.has(result.tool)) throw Error('The assistant repeated its workbook request. Select a specific range and try again.');
       requested.add(result.tool);
+      if (result.tool==='CompareColumnTotals'&&!['percentage','ratio'].includes(goal))
+        throw Error('Confirm whether you want a ratio or percentage of two column totals and identify the two measures.');
       if (needsCalculation && !['InspectWorkbook','InspectWorksheet','InspectRange'].includes(result.tool) &&
           !calculatesGoal(goal,result))
         throw Error('No calculation was performed. Select the relevant data and specify the measure or grouping column.');
@@ -1136,7 +1145,8 @@ async function ask(question,conversation) {
           state.evidence=outcome.report.evidence;
           state.evidenceGroup=outcome.report.groups[0].label;
         }
-        state.messages.push({role:'assistant',text:outcome.local,report:outcome.report});
+        if (outcome.statistics) state.evidence=null;
+        state.messages.push({role:'assistant',text:outcome.local,report:outcome.report,statistics:outcome.statistics});
         return '';
       }
       if (outcome.compare) {

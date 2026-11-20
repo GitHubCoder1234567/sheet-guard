@@ -677,6 +677,10 @@ async function datasetTarget(ctx,target,mode) {
 }
 
 // Long selections are loaded in bounded blocks. No cells are changed.
+function completeMatrix(matrix,rows,columns) {
+  return Array.isArray(matrix)&&matrix.length===rows&&matrix.every(row=>Array.isArray(row)&&row.length===columns);
+}
+
 export async function readDataset(signal,onProgress,target,expand=false,evidence=false) {
   return workbookRun('read dataset',async ctx=>{
     const mode=targetMode(target);
@@ -699,24 +703,27 @@ export async function readDataset(signal,onProgress,target,expand=false,evidence
       throw new WorkbookError('empty_dataset','read dataset','Select a header and at least one data row.');
     if (rows>DATASET_ROW_LIMIT || rows*columns>DATASET_CELL_LIMIT)
       throw new WorkbookError('payload_limit','read dataset','Select a header and data within 50,000 rows and 160,000 cells.');
-    const values=[],errors=[],display=[],formats=[],types=[];
+    const values=[],errors=[],display=[],formats=[],types=[],formulas=[];
     const blockSize=Math.max(1,Math.min(2000,Math.floor(8000/columns)));
     let textSize=0;
     for (let offset=0;offset<rows;offset+=blockSize) {
       checkCancel(signal);
       const block=sheet.getRange(a1(r+offset,c,Math.min(blockSize,rows-offset),columns));
-      block.load(evidence?'values,valueTypes,text,numberFormat':'values,valueTypes');await ctx.sync();
+      block.load(evidence?'values,valueTypes,text,numberFormat,formulas':'values,valueTypes');await ctx.sync();
       const expected=Math.min(blockSize,rows-offset);
-      if (block.values.length!==expected || block.valueTypes.length!==expected ||
-          block.values.some((row,i)=>row.length!==columns||block.valueTypes[i]?.length!==columns))
+      const matrices=[block.values,block.valueTypes];
+      if (evidence) matrices.push(block.text,block.numberFormat,block.formulas);
+      if (!matrices.every(matrix=>completeMatrix(matrix,expected,columns)))
         throw new WorkbookError('partial_read','read dataset','Excel returned incomplete rows. Try again with a smaller range.');
       for (let i=0;i<block.values.length;i++) {
         const row=block.values[i];
         textSize+=row.reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
         if (evidence) {
-          const text=block.text?.[i]??[],format=block.numberFormat?.[i]??[];
+          const text=block.text[i],format=block.numberFormat[i];
+          const expressions=block.formulas[i].map((v,c)=>typeof v==='string'&&v.startsWith('=')&&v!==row[c]?v:null);
+          formulas.push(expressions);
           display.push(text);formats.push(format);types.push(block.valueTypes[i]);
-          textSize+=text.concat(format).reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
+          textSize+=text.concat(format,expressions).reduce((n,v)=>n+(typeof v==='string'?v.length:0),0);
         }
         if (textSize>4000000) throw new WorkbookError('payload_limit','read dataset','This selection contains too much text. Choose fewer columns or rows.');
         values.push(row);
@@ -725,7 +732,7 @@ export async function readDataset(signal,onProgress,target,expand=false,evidence
       onProgress?.(values.length,rows);
     }
     checkCancel(signal);
-    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),table:table??null,values,errors,...(evidence?{display,formats,types}:{})};
+    return {sheetId:sheet.id,sheet:sheet.name,address:a1(r,c,rows,columns),table:table??null,values,errors,...(evidence?{display,formats,types,formulas}:{})};
   });
 }
 
@@ -833,7 +840,7 @@ export async function inspectActiveObjects({sheetId,sample=false}={}) {
     if (overview.tables.length||region) await ctx.sync();
     if (region) {
       const {cells,rows,columns,address,partial}=region;
-      if (cells.values.length!==rows||cells.values.some(row=>row.length!==columns))
+      if (![cells.values,cells.valueTypes,cells.numberFormat,cells.formulas].every(matrix=>completeMatrix(matrix,rows,columns)))
         throw new WorkbookError('partial_read','discover worksheet datasets','Excel returned incomplete data for discovery.');
       overview.sample={address,partial,values:cells.values,types:cells.valueTypes,formats:cells.numberFormat,formulas:cells.formulas};
     }

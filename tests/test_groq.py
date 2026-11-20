@@ -80,6 +80,13 @@ class GroqTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 server.groq_reason(data, "test-key")
 
+    def test_dependent_total_tool_validates_operands_and_operation(self):
+        allowed = plan(tool="CompareColumnTotals", measure="Received", dimension="Forecast", operation="percentage")
+        self.assertEqual(server.parse_groq_response(envelope(allowed).read(), True, True), allowed)
+        for invalid in ({"measure": ""}, {"dimension": " "}, {"operation": "edit"}, {"address": "A1:B3"}):
+            with self.assertRaisesRegex(server.GroqProtocolError, "invalid_tool_arguments"):
+                server.parse_groq_response(envelope(allowed | invalid).read(), True, True)
+
     def test_truncated_reply_retries_with_more_room_and_safe_logging(self):
         data={"question":"Analyse the Sales Audit worksheet. Rank every product category by total sales. Show the exact cells used for each calculation."}
         expected=plan(tool="AggregateData",sheet="Sales Audit",measure="Sales",dimension="Category",operation="highest")
