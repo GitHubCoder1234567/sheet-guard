@@ -1,5 +1,5 @@
 import {executeStatisticsPlan} from './statistics-plan.mjs';
-import {aggregationEvidence} from './evidence.mjs';
+import {aggregationEvidence,rankedGroups} from './evidence.mjs';
 import {a1, datasetColumns, formula, formulaReferences, profile, rect, summariseBy, DATASET_CELL_LIMIT} from './engine.mjs';
 
 const tools=new Set(['InspectWorkbook','InspectWorksheet','InspectRange','AnalyseColumn','AggregateData','CompareColumnTotals',
@@ -267,11 +267,7 @@ export function rankedAnalysis(intent,d) {
     '). Select a single-currency range or supply a separate converted measure before ranking.');
   const excluded=Object.entries(evidence.reasons).map(([reason,count])=>reason+': '+count).join(', ');
   const dimensionRange=scope.sheet+'!'+scope.groupRange,measureRange=scope.sheet+'!'+scope.measureRange;
-  let rank=0;
-  const groups=evidence.groups.map(({label,sum,records},index)=>{
-    if (index===0 || sum!==evidence.groups[index-1].sum) rank=index+1;
-    return {label,sum,records:records.length,rank};
-  });
+  const groups=rankedGroups(evidence);
   const best=intent.operation==='lowest'?groups.at(-1).sum:groups[0].sum;
   const winners=groups.filter(g=>g.sum===best);
   const money=n=>n.toLocaleString(undefined,{maximumFractionDigits:10});
