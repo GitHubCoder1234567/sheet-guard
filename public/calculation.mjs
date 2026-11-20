@@ -3,6 +3,7 @@ import {cellRecord,explicitCurrencyCodes,rangeShape} from './workbook-data.mjs';
 
 const arithmetic=new Set(['sum','average','minimum','maximum','median']);
 const operations=new Set([...arithmetic,'numeric count','non-empty count','distinct count']);
+export const supportedColumnOperation=operation=>operations.has(operation);
 
 function checkedSum(numbers) {
   let sum=0, compensation=0;
@@ -56,5 +57,5 @@ export function calculateColumn(dataset,{operation,column}) {
       range:a1(bounds.r+1,bounds.c+index,bounds.rows-1,1)},
     counts:{included:contributors.length,excluded:excluded.length},contributors,excluded,
     scope:'full selected rectangle; includes hidden and filtered rows',
-    observedCurrency:codes.length===1?codes[0]:null};
+    observedCurrency:arithmetic.has(operation)&&codes.length===1?codes[0]:null};
 }

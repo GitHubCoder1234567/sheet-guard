@@ -1,3 +1,4 @@
+import {statisticsQuery,executeStatisticsPlan,replayStatisticsEvidence} from './statistics-plan.mjs';
 import {inspectKeyRelationship} from './relationships.mjs';
 import {conditionalQuery, readPlannedDataset} from './query-plan.mjs';
 import {calculateColumn} from './calculation.mjs';
@@ -618,6 +619,17 @@ function chatView() {
       },{localOnly:true}),'Reading and filtering the selected data…');
       return;
     }
+    const statistics=statisticsQuery(q);
+    if (statistics) {
+      run(()=>submitQuestion(q,async()=>{
+        if (statistics.error) throw Error(statistics.error);
+        const report=await executeStatisticsPlan(statistics.plan,captureDataset);
+        state.evidence=null;
+        state.messages.push({role:'assistant',text:'Statistics for '+report.results[0].field+
+          ' in '+report.identity.sheet+'!'+report.identity.address+'.',statistics:report});
+      },{localOnly:true}),'Calculating from the requested dataset…');
+      return;
+    }
     const numericRequest=/^(?:calculate (?:the )?)?(sum|average|minimum|maximum|median|numeric count|non-empty count|distinct count) of (.+) in (?:the |this |my )?selection[.!?]?$/i.exec(q);
     if (numericRequest) {
       run(()=>submitQuestion(q,()=>answerColumn(numericRequest[1].toLowerCase(),numericRequest[2])),'Reading selected column…');
@@ -652,6 +664,7 @@ function chatView() {
   for (const m of state.messages.slice(-18)) {
     const item=block(node('div',m.role==='user'?'You':'Forma','meta'),node('p',m.text,'chat'));
     if (m.report) item.append(rankingTable(m));
+    if (m.statistics) item.append(statisticsPanel(m.statistics));
     if (m.explanation) item.append(node('p',m.explanation,'muted'));
     if (m.rows) item.append(evidenceRows(m));
     if (m.proposal && !state.dismissed.has(m.proposal.id)) item.append(button('Review proposal',()=>{
@@ -702,6 +715,23 @@ function evidenceRows(message) {
     await selectEvidenceRange(previous.id,previous.address);
     state.evidenceBack=null;
   },'Restoring selection…')));
+  return section;
+}
+
+function statisticsPanel(report) {
+  const section=node('section');
+  for (const result of report.results) {
+    const value=result.result.toLocaleString(undefined,{maximumSignificantDigits:15});
+    section.append(node('p',result.operation+' · '+value+(result.observedCurrency?' '+result.observedCurrency:'')+
+      ' · '+result.counts.included+' included, '+result.counts.excluded+' excluded'));
+    section.append(button('Sources for '+result.operation,()=>run(async()=>{
+      const evidence=await replayStatisticsEvidence(report,result.operation,captureDataset);
+      const rows=evidence.contributors.map(cell=>({measureCell:cell.address,value:cell.raw,identifier:null,displayed:cell.displayed}));
+      state.messages.push({role:'assistant',text:evidence.operation+' contributors in '+evidence.source.sheet+'!'+evidence.source.range+'.',
+        rows,sheet:evidence.source.sheet,sheetId:evidence.source.sheetId});
+      return 'Source snapshot verified.';
+    },'Rechecking statistic sources…')));
+  }
   return section;
 }
 
@@ -931,7 +961,7 @@ async function preparePivot(question) {
 
 async function submitQuestion(question,work,{localOnly=false}={}) {
   state.chatError='';
-  const conversation=state.messages.filter(m=>!m.failed&&!m.report&&!m.rows&&!m.localOnly).slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
+  const conversation=state.messages.filter(m=>!m.failed&&!m.report&&!m.rows&&!m.statistics&&!m.localOnly).slice(-6).map(m=>({role:m.role,text:m.text.slice(0,950)}));
   const previous=state.messages.at(-1);
   const turn=previous?.failed && previous.text===question?previous:{role:'user',text:question};
   if (localOnly) turn.localOnly=true;

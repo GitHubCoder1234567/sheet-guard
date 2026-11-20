@@ -3,7 +3,7 @@ import {pathToFileURL} from 'node:url';
 
 export const scenarios = [
   'connect', 'worksheet-resolution', 'renamed-sheet', 'deleted-sheet', 'table-and-totals',
-  'named-range', 'ambiguous-data', 'typed-values', 'sales-ranking', 'column-calculation',
+  'named-range', 'ambiguous-data', 'typed-values', 'sales-ranking', 'column-calculation', 'composed-statistics',
   'source-selection', 'formula-errors', 'provider-probe', 'provider-fallback', 'report-privacy',
   'preview-cancel', 'stale-preview', 'apply-and-undo', 'protected-sheet', 'large-range',
   'discovery', 'resource-planning', 'formula-inspection', 'cross-sheet', 'key-relationships', 'ai-conversation', 'evidence-followup', 'conditional-ranking',
