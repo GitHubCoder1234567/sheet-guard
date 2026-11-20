@@ -158,3 +158,28 @@ test('workbook-scoped names must refer to an available range on the requested sh
   namedRange.isNullObject=true;
   await assert.rejects(readDataset(undefined,undefined,target),error=>error.category==='invalid_reference');
 });
+
+test('global resources bind to the owning worksheet and never fall back to the active selection',async()=>{
+  globalThis.Office={context:{requirements:{isSetSupported:()=>true}}};
+  const values=[['Class','Weight'],['Amber',5]];
+  const dims={rowIndex:3,columnIndex:2,rowCount:2,columnCount:2,load(){}};
+  const sheet={id:'other-sheet',name:'Other worksheet',visibility:'Visible',load(){},
+    getRange(address){assert.equal(address,'C4:D5');
+      return {...dims,values,valueTypes:[['String','String'],['String','Double']]};},
+    getUsedRangeOrNullObject:()=>dims};
+  const table={name:'OtherTable',showHeaders:true,showTotals:true,worksheet:sheet,load(){},
+    getRange:()=>({...dims,rowCount:3})};
+  const name={type:'Range',load(){},getRangeOrNullObject:()=>({...dims,worksheet:sheet})};
+  const book={tables:{getItemOrNullObject:value=>value==='OtherTable'?table:{isNullObject:true,load(){}}},
+    names:{getItemOrNullObject:()=>name},worksheets:{items:[sheet],load(){}},
+    getSelectedRange(){assert.fail('Scope must never fall back to the selection');}};
+  globalThis.Excel={run:work=>work({sync:async()=>{},workbook:book})};
+  for (const target of [{table:'OtherTable'},{namedRange:'MyRange'},{worksheet:'oTHER WORKSHEET'}]) {
+    const result=await readDataset(undefined,undefined,target,false);
+    assert.equal(result.sheetId,'other-sheet');assert.equal(result.address,'C4:D5');
+  }
+  await assert.rejects(readDataset(undefined,undefined,{table:'Removed'}),e=>e.category==='missing_target');
+  sheet.visibility='Hidden';
+  await assert.rejects(readDataset(undefined,undefined,{table:'OtherTable'}),e=>e.category==='hidden_target');
+  await assert.rejects(readDataset(undefined,undefined,{worksheet:'Other worksheet'}),e=>e.category==='hidden_target');
+});

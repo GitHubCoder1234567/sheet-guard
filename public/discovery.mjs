@@ -1,4 +1,5 @@
 import {a1,rect,datasetColumns,DATASET_CELL_LIMIT} from './engine.mjs';
+import {explicitCurrencyCodes} from './workbook-data.mjs';
 
 const present=value=>value!==''&&value!==null&&value!==undefined;
 const numeric=value=>typeof value==='number'&&Number.isFinite(value);
@@ -13,11 +14,14 @@ function populatedSpans(flags) {
   return spans;
 }
 
-function classifyColumn(label,values) {
-  const nonempty=values.filter(present);
+function classifyColumn(label,values,types,formats,formulas) {
+  const nonempty=values.filter((value,i)=>present(value)&&types[i]!=='Error');
   const numbers=nonempty.filter(numeric).length;
   const text=nonempty.filter(v=>typeof v==='string').length;
-  const evidence={nonempty:nonempty.length,numeric:numbers,text,distinct:new Set(nonempty).size};
+  const evidence={nonempty:nonempty.length,numeric:numbers,text,distinct:new Set(nonempty).size,
+    booleans:nonempty.filter(v=>typeof v==='boolean').length,errors:types.filter(v=>v==='Error').length,
+    formulas:formulas.filter((v,i)=>typeof v==='string'&&v.startsWith('=')&&v!==values[i]).length,
+    currencyCodes:explicitCurrencyCodes(formats)};
   const key=/\b(?:id|identifier|key)\b/i.test(label);
   if (key) return {role:'identifier candidate',confidence:evidence.distinct===nonempty.length&&nonempty.length>=3?'supported':'tentative',evidence};
   if (/\b(?:date|month|period|year)\b/i.test(label))
@@ -27,7 +31,7 @@ function classifyColumn(label,values) {
   return {role:'mixed or empty',confidence:'tentative',evidence};
 }
 
-export function discoverRegions({values,address,partial=false}) {
+export function discoverRegions({values,address,partial=false,types,formats,formulas}) {
   const bounds=rect(address,DATASET_CELL_LIMIT);
   if (values.length!==bounds.rows||values.some(row=>row.length!==bounds.columns))
     throw Error('Workbook snapshot dimensions could not be verified.');
@@ -60,7 +64,9 @@ export function discoverRegions({values,address,partial=false}) {
         ambiguous.push({address:addressOf(headerRow,stop-headerRow),reason:repeated?'Repeated header row.':'Possible total or subtotal row.'});
         continue;
       }
-      const columns=headers.map((label,i)=>({label,...classifyColumn(label,following.map(row=>row[i]))}));
+      const field=(matrix,i)=>matrix?.slice(headerRow+1,stop).map(row=>row?.[c+i])??[];
+      const columns=headers.map((label,i)=>({label,...classifyColumn(label,following.map(row=>row[i]),
+        field(types,i),field(formats,i),field(formulas,i))}));
       const numericEvidence=columns.some(x=>x.role==='numeric measure candidate');
       const confidence=!partial&&numericEvidence&&following.length>=2?'supported':'tentative';
       regions.push({address:addressOf(headerRow,stop-headerRow),headers,columns,rows:following.length,confidence,
@@ -76,7 +82,7 @@ export function chooseDiscoveredRegion(dataset) {
     return null;
   const chosen=profile.regions[0],{row,column,rows,columns}=chosen.offsets;
   const cut=matrix=>matrix?.slice(row,row+rows).map(line=>line.slice(column,column+columns));
-  return {...dataset,address:chosen.address,values:cut(dataset.values),display:cut(dataset.display),formats:cut(dataset.formats),types:cut(dataset.types),
+  return {...dataset,address:chosen.address,values:cut(dataset.values),display:cut(dataset.display),formats:cut(dataset.formats),types:cut(dataset.types),formulas:cut(dataset.formulas),
     errors:dataset.errors?.slice(row,row+rows).map(line=>line.filter(i=>i>=column&&i<column+columns).map(i=>i-column)),
     discovery:'worksheet region inferred from headers and typed data'};
 }

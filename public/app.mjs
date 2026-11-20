@@ -1,5 +1,5 @@
 import {inspectKeyRelationship} from './relationships.mjs';
-import {conditionalQuery} from './query-plan.mjs';
+import {conditionalQuery, readPlannedDataset} from './query-plan.mjs';
 import {calculateColumn} from './calculation.mjs';
 import {runDiagnostics, runLightDiagnostics} from './diagnostics.mjs';
 import {discoverRegions, chooseDiscoveredRegion} from './discovery.mjs';
@@ -125,13 +125,46 @@ async function toggleMonitoring() {
   });
   return 'Workbook monitoring enabled. Changed sheets will be sampled.';
 }
+function datasetDiscoveryPanel() {
+  const panel=block(button('Discover worksheet datasets',()=>run(async()=>{
+    const info=await inspectActiveObjects({sample:true});
+    const profile=info.sample?discoverRegions(info.sample):null;
+    state.discovery={info,profile};
+    return 'Worksheet discovery complete.';
+  },'Inspecting the active worksheet…')));
+  if (!state.discovery) return panel;
+  const {info,profile}=state.discovery;
+  const protection=info.protected===null?'Protection status unavailable':info.protected?'Protected':'Unprotected';
+  panel.append(node('h3',info.sheet.name),node('p',
+    (info.used?'Used range '+info.used.address:'No populated cells')+' · '+protection));
+  for (const table of info.tables) panel.append(node('p',table.name+' · '+table.address,'address'));
+  if (info.tableCount>info.tables.length) panel.append(node('p','Showing '+info.tables.length+' of '+info.tableCount+' tables.','muted'));
+  if (info.dataNames.length) panel.append(node('p','Workbook range names · '+info.dataNames.join(', '),'muted'));
+  if (profile) {
+    panel.append(node('p','Inferred regions · '+profile.coverage,'meta'));
+    for (const region of profile.regions.slice(0,8)) {
+      const regionDetail=node('details');
+      regionDetail.append(node('summary',region.address+' · '+region.confidence));
+      for (const {label,role,evidence} of region.columns)
+        regionDetail.append(node('p',label+' · '+role+
+          (evidence.formulas?' · '+evidence.formulas+' formulas':'')+
+          (evidence.errors?' · '+evidence.errors+' errors':'')+
+          (evidence.currencyCodes.length?' · formats show '+evidence.currencyCodes.join(', '):'')));
+      panel.append(regionDetail);
+    }
+    for (const item of profile.ambiguous.slice(0,8)) panel.append(node('p',item.address+' · '+item.reason,'muted'));
+    if (profile.regions.length+profile.ambiguous.length===0) panel.append(node('p','No eligible dataset was identified in the examined cells.','muted'));
+  }
+  return panel;
+}
+
 function auditView() {
   const controls=node('div',undefined,'actions');
   controls.append(button('Scan visible sheets',()=>run(doScan,'Scanning workbook…'),{primary:true}));
   if (state.scanController) controls.append(button('Cancel scan',()=>state.scanController.abort(),{during:true}));
   controls.append(button(state.monitor?'Pause monitoring':'Enable monitoring',
     ()=>run(toggleMonitoring,'Updating monitoring…'),{enabled:supported('1.7')}));
-  main.append(controls);
+  main.append(controls,datasetDiscoveryPanel());
   if (!state.scanned) {main.append(block(node('p','Scan the workbook for formula patterns, data quality issues and visualisation opportunities.')));return;}
   const stats=node('div',undefined,'metrics');
   const cells=state.snapshots.reduce((n,s)=>n+s.values.length*s.values[0].length,0);
@@ -146,26 +179,6 @@ function auditView() {
   if (partial.length || state.omitted) main.append(node('p',
     (partial.length?'Sampled ranges on '+partial.join(', ')+'. ':'')+
     (state.omitted?state.omitted+' visible sheet(s) beyond the scan limit.':''),'muted'));
-  main.append(button('Discover active worksheet',()=>run(async()=>{
-    const active=await activeWorksheet();
-    const info=await inspectActiveObjects();
-    const result=state.snapshots.find(s=>s.id===active.id);
-    const sample=result?discoverRegions({...result,address:a1(result.row,result.column,result.values.length,result.values[0].length)}):null;
-    state.discovery={active,info,sample};
-    return 'Worksheet discovery complete.';
-  },'Inspecting worksheet structure…')));
-  if (state.discovery) {
-    const {active,info,sample}=state.discovery;
-    const found=block(node('h3',active.name),node('p',
-      (info.used?'Used range '+info.used.address:'No populated cells')+' · '+(info.protected===true?'Protected':'Protection not reported as enabled')));
-    for (const table of info.tables) found.append(node('p',table.name+' · '+table.address,'address'));
-    if (sample) {
-      found.append(node('p','Inferred regions · '+sample.coverage,'meta'));
-      for (const region of sample.regions.slice(0,8)) found.append(node('p',region.address+' · '+region.confidence+' · '+region.headers.join(', ')));
-      for (const item of sample.ambiguous.slice(0,8)) found.append(node('p',item.address+' · '+item.reason,'muted'));
-    }
-    main.append(found);
-  }
   const structure=node('details');
   structure.append(node('summary','Workbook structure'));
   for (const sheet of state.sheets.slice(0,30)) {
@@ -597,8 +610,8 @@ function chatView() {
     if (conditional) {
       run(()=>submitQuestion(q,async()=>{
         if (conditional.error) throw Error(conditional.error);
-        const data=await captureDataset(undefined,true,true);
         const queryPlan=conditional.plan;
+        const data=await readPlannedDataset(queryPlan,captureDataset);
         const report=rankedAnalysis({dimension:queryPlan.group,measure:queryPlan.measure,queryPlan,sessionId:state.sessionId},data);
         state.evidence=report.evidence;state.evidenceGroup=report.groups[0].label;
         state.messages.push({role:'assistant',text:report.text,report});
@@ -711,7 +724,7 @@ async function answerEvidence(question,kind,exactGroup) {
   if (queryPlan&&kind!=='records')
     throw Error('This filtered ranking supports source records. Run an unfiltered ranking before changing the grouping or proposing edits.');
   const target=source.table?{sheetId:source.sheetId,table:source.table}:{sheetId:source.sheetId,address:source.address};
-  const data=await captureDataset(target,false,true);
+  const data=await (queryPlan?.target?readPlannedDataset(queryPlan,captureDataset):captureDataset(target,false,true));
   const current=aggregationEvidence(data,fields,{sessionId:state.sessionId,normalised:prior.grouping!=='exact label',queryPlan});
   if (!sameEvidence(prior,current)) {
     state.evidence=null;

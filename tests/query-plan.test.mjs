@@ -91,3 +91,32 @@ test('conditional ranking matches independent record-level oracles across rename
       }
   }
 });
+
+test('scoped plans bind exact workbook targets and fail closed on ambiguous worksheet layouts',async()=>{
+  const {readPlannedDataset}=await import('../public/query-plan.mjs');
+  for (const [suffix,target] of [
+    ['table "OpsData"',{table:'OpsData'}],['named range "HoursRoster"',{namedRange:'HoursRoster'}],
+    ['worksheet "Unfamiliar ""name"',null],
+  ]) {
+    const result=conditionalQuery(question+' in '+suffix);
+    if (!target) {assert(result.error);continue;}
+    assert.deepEqual(result.plan.target,target);
+    const sheet=await readPlannedDataset(result.plan,async(...args)=>{
+      assert.deepEqual(args,[target,false,true]);
+      return data();
+    });
+    assert.equal(sheet.address,'F8:I16');
+  }
+  const {plan}=conditionalQuery(question+' in worksheet "工房 \'Q3"');
+  assert.deepEqual(plan.target,{worksheet:"工房 'Q3"});
+  const clean={address:'A1:D4',values:[['Programme','Hours','Phase','Priority'],['A',1,'Active',2],
+    ['B',2,'Done',3],['A',3,'Active',4]]};
+  const complete=await readPlannedDataset(plan,async()=>clean);
+  assert.equal(complete.address,'A1:D4');
+  await assert.rejects(readPlannedDataset(plan,async()=>({...clean,partial:true})),/full requested range/);
+  const split={address:'A1:I4',values:clean.values.map(row=>[...row,'',...row])};
+  await assert.rejects(readPlannedDataset(plan,async()=>split),/could not identify one dataset/);
+  await assert.rejects(readPlannedDataset({...plan,target:{worksheet:'a',table:'b'}},async()=>{
+    assert.fail('An invalid source must not reach Excel');
+  }),/source is invalid/);
+});
